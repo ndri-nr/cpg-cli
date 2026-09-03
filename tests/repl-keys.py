@@ -59,6 +59,9 @@ def main():
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["TERM"] = "xterm-256color"
+        # Mouse capture is opt-in, but the wheel decoding and the "hand the mouse
+        # back on exit" check below only mean something with it on.
+        os.environ["CPG_MOUSE"] = "1"
         os.chdir(REPO)
         os.execv(BASH, [BASH, "cpg-cli.sh"])
         os._exit(1)                                        # unreachable

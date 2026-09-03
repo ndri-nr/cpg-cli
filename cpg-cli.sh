@@ -375,10 +375,10 @@ Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
 Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
-Scroll (wheel / PgUp-PgDn) geser area output doang - kotak input tetep di bawah,
-dan gak bisa kelewat keluar dari layar cpg. End atau langsung ngetik = balik ke
-output terbaru. Select teks pakai Option-drag (mouse-nya dipegang cpg); CPG_MOUSE=0
-buat balikin wheel + drag ke terminal.
+PgUp/PgDn geser area output doang - kotak input tetep di bawah. End atau langsung
+ngetik = balik ke output terbaru. Mau wheel ikut ngegeser area output (bukan geser
+window)? CPG_MOUSE=1 - bayarannya select teks jadi butuh Option-drag, makanya
+default-nya mati.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -900,13 +900,14 @@ _cpg_pinned_ok() {
 # what Claude Code does too (its binary carries the same DECSTBM + SGR-mouse +
 # "jump to bottom" machinery).
 #
-# No alternate screen on purpose: staying on the main screen keeps the terminal's
-# own scrollback and its text selection working. The one cost of mouse reporting is
-# that a plain drag goes to us, not to the terminal, so selecting text needs the
-# terminal's modifier (Option-drag in Terminal.app and iTerm2). CPG_MOUSE=0 turns
-# the capture off and gives the wheel back to the terminal.
+# OFF by default, because taking the wheel also takes plain drags - and then the
+# terminal can't select text for copying, which costs more than it gains. Claude
+# Code makes the same call: its renderer only arms mouse tracking when it enters the
+# alternate screen (`altScreenMouseTracking`), and its normal REPL asks for focus
+# reporting and nothing else. CPG_MOUSE=1 opts in: wheel and PageUp/PageDown then
+# scroll the pane under a fixed box, at the cost of needing Option-drag to select.
 _cpg_mouse_on() {
-  [[ "${CPG_MOUSE:-${CPG_ALTSCREEN:-1}}" != "0" ]] || return 0
+  [[ "${CPG_MOUSE:-${CPG_ALTSCREEN:-0}}" != "0" ]] || return 0
   _CPG_ALT=1
   # ?1000h = report button presses (not drags: ?1002/?1003 would take even more of
   # the mouse away), ?1006h = report them in SGR form (`ESC [ < b ; x ; y M`), the
