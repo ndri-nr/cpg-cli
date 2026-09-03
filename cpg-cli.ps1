@@ -540,6 +540,45 @@ function Get-Hr {
   return ("─" * $width)
 }
 
+# Redraws just the top/bottom border rows around $origPos (the boxed-prompt input
+# line's saved cursor position) without disturbing it - same idea as bash's
+# _cpg_redraw_borders, just via CursorPosition instead of tput sc/cuu/cud/rc.
+function Redraw-Borders($origPos) {
+  try {
+    $topPos = New-Object -TypeName System.Management.Automation.Host.Coordinates -ArgumentList 0, ([Math]::Max(0, $origPos.Y - 1))
+    $Host.UI.RawUI.CursorPosition = $topPos
+    Write-Host (Get-Hr) -ForegroundColor DarkGray
+    $botPos = New-Object -TypeName System.Management.Automation.Host.Coordinates -ArgumentList 0, ($origPos.Y + 1)
+    $Host.UI.RawUI.CursorPosition = $botPos
+    Write-Host (Get-Hr) -ForegroundColor DarkGray
+    $Host.UI.RawUI.CursorPosition = $origPos
+  } catch { }
+}
+
+# Polls window width while idle at the boxed prompt (before the first keystroke),
+# redrawing the borders live on resize. `[Console]::KeyAvailable` just peeks - it
+# doesn't consume the key, so Read-Host still sees it normally right after this
+# returns. Ceiling here (unlike bash's SIGWINCH, which really interrupts mid-line):
+# .NET's Read-Host has no hook to interrupt an in-progress line edit, so once you
+# start typing this can't catch further resizes until you hit Enter - idle-only.
+function Wait-KeyOrResize {
+  $origPos = $Host.UI.RawUI.CursorPosition
+  $lastWidth = $Host.UI.RawUI.WindowSize.Width
+  try {
+    while (-not [Console]::KeyAvailable) {
+      Start-Sleep -Milliseconds 150
+      $w = $Host.UI.RawUI.WindowSize.Width
+      if ($w -ne $lastWidth) {
+        $lastWidth = $w
+        Redraw-Borders $origPos
+      }
+    }
+  } catch {
+    # stdin redirected/piped (non-interactive runs, e.g. scripted smoke tests) -
+    # KeyAvailable throws there. Just skip polling and let Read-Host read directly.
+  }
+}
+
 function Show-Banner {
   Write-Host "╭─────────────────────────────────────╮" -ForegroundColor DarkYellow
   Write-Host -NoNewline "│ " -ForegroundColor DarkYellow
@@ -604,6 +643,7 @@ function Start-Repl {
       $Host.UI.RawUI.CursorPosition = $pos
     } catch { }
     Write-Host -NoNewline "❯ " -ForegroundColor DarkYellow
+    Wait-KeyOrResize
     $line = Read-Host
     if ($null -eq $line) { break }
     $line = $line.TrimStart("/")

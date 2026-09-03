@@ -661,6 +661,24 @@ hr() {
   echo
 }
 
+# Fired on SIGWINCH while `read -e` is waiting at the boxed prompt, so resizing
+# mid-type redraws the border NOW instead of only on the next Enter. Cursor sits
+# on the blank input line (between the two borders) when this fires - `tput sc`
+# saves that exact spot, then we hop up 1 line to redraw the top border, hop
+# down 2 to redraw the bottom one, and `tput rc` snaps back regardless of which
+# lines we visited in between. `tput el` clears leftover chars if the new width
+# is narrower than the old one.
+_cpg_redraw_borders() {
+  tput sc 2>/dev/null || return
+  tput cuu 1 2>/dev/null
+  printf '\r'; tput el 2>/dev/null
+  printf '%s' "$C_DIM"; hr; printf '%s' "$C_RESET"
+  tput cud 2 2>/dev/null
+  printf '\r'; tput el 2>/dev/null
+  printf '%s' "$C_DIM"; hr; printf '%s' "$C_RESET"
+  tput rc 2>/dev/null
+}
+
 repl() {
   IN_REPL=1
   printf '\033]0;%s\007' "✳  cpg-cli" 2>/dev/null || true
@@ -694,7 +712,15 @@ repl() {
     # escape bytes into the buffer (garbled input, cursor jumps around but doesn't
     # actually navigate). `history -s` after each line makes up/down arrow recall
     # previous commands too, like a real shell.
-    if ! read -e -rp "${C_ACCENT}❯${C_RESET} " line; then
+    # Trap only wraps the read - a redraw mid command-output would corrupt whatever
+    # else is on screen, so it's off everywhere else in the loop. `|| rc=$?` (not
+    # `; rc=$?`) because `set -e` is on: a bare failing command outside a tested
+    # context would kill the whole script before `rc` is even read.
+    rc=0
+    trap _cpg_redraw_borders WINCH
+    read -e -rp "${C_ACCENT}❯${C_RESET} " line || rc=$?
+    trap - WINCH
+    if [[ $rc -ne 0 ]]; then
       echo
       break
     fi

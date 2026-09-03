@@ -288,6 +288,16 @@ cpg-cli/
   bind-mount can't preserve directly - `mongo/mongo-entrypoint.sh` copies it
   into the container and fixes ownership/permissions before starting `mongod`,
   same trick as `postgres/replica-entrypoint.sh`.
+- **Live resize of the boxed prompt borders differs bash vs. PowerShell.** In
+  bash, resizing the terminal *while sitting idle at the `❯` prompt* redraws
+  the border immediately (`SIGWINCH` trap around the `read -e` call - see
+  `_cpg_redraw_borders` in `cpg-cli.sh`). `Read-Host` has no equivalent hook to
+  interrupt an in-progress line read, so `cpg-cli.ps1` polls
+  `$Host.UI.RawUI.WindowSize.Width` every 150ms while idle instead
+  (`Wait-KeyOrResize`) - it catches a resize before you start typing, but once
+  you've typed anything, further resizes only reflow on the next Enter, same
+  as before this feature existed. Both versions already re-fit on every new
+  command regardless.
 - **`cpg-cli.ps1` is saved with a UTF-8 BOM on purpose.** Windows PowerShell
   5.1 parses a `.ps1` file with no BOM using the system's ANSI codepage, not
   UTF-8 - the moment the file has any non-ASCII character (the ✳/●/▸/❯ icons),
