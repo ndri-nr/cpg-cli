@@ -749,6 +749,7 @@ $script:PinnedBottom = 20
 $script:PinnedReserved = 4 # hint + box top + input line + box bottom
 $script:PinnedHint = "contoh: /status, /start db, /detail, /help"
 $script:CpgHistory = @()
+$script:PaneEmpty = $true # fresh/just-cleared pane fills from the top, not the bottom
 $script:ReplQuit = $false
 $script:E = [char]27
 
@@ -804,13 +805,24 @@ function Disable-PinnedRegion {
   Write-Vt "$($script:E)[r$($script:E)[$($script:PinnedRows);1H$($script:E)[0m`r`n"
 }
 
-# Parks the cursor at the scroll region's bottom margin so whatever prints next
-# rises above the input box. Re-asserts the region first: Clear-Host, docker's
-# progress renderer or anything else that resets the margins behind our back gets
-# corrected here. The trailing newline scrolls one blank row in, which also spaces
-# each command's output apart like the old prompt's blank line did.
+# Puts the cursor back where the last pane output ended (DECRC, ESC 8), so a fresh or
+# just-cleared pane fills from the TOP and only starts scrolling once it's full -
+# output nailed to the bottom margin left the banner floating at the bottom of an
+# otherwise empty screen. Re-asserts the region first: Clear-Host, docker's progress
+# renderer or anything else that resets the margins behind our back gets corrected
+# here (DECSTBM homes the cursor, hence the restore right after it). The blank
+# separator row is skipped while the pane is still empty.
 function Enter-Pane {
-  Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H`r`n"
+  $out = "$($script:E)[1;$($script:PinnedBottom)r$($script:E)8"
+  if (-not $script:PaneEmpty) { $out += "`r`n" }
+  Write-Vt $out
+}
+
+# Hands the pane cursor back for the next Enter-Pane (DECSC, ESC 7). The terminal is
+# the one tracking it, so it stays right through wrapped lines.
+function Save-PaneCursor {
+  $script:PaneEmpty = $false
+  Write-Vt "$($script:E)7"
 }
 
 # Repaints the 4 pinned rows and parks the cursor inside the box. Long input scrolls
@@ -897,7 +909,11 @@ function Read-PinnedLine {
         if ($script:PinnedRows -gt $pr -and $pr -gt 3) {
           Write-Vt "$($script:E)[r$($script:E)[$($pr - 3);1H$($script:E)[0J"
         }
-        Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H"
+        # The saved pane cursor is an absolute row, so a resize makes it stale -
+        # re-anchor it at the region's bottom margin (where output would land anyway
+        # on a full pane) rather than risk restoring into the box's rows.
+        Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H$($script:E)7"
+        $script:PaneEmpty = $false
         Show-PinnedPrompt $buf $pos
       }
     }
@@ -948,6 +964,7 @@ function Read-PinnedLine {
         if ($r.Matches.Count -gt 1) {
           Enter-Pane
           Write-Host ("  " + ($r.Matches -join " ")) -ForegroundColor DarkGray
+          Save-PaneCursor
         }
       }
       default {
@@ -962,7 +979,12 @@ function Read-PinnedLine {
               $pos = 0
             }
             "K" { $buf = $buf.Substring(0, $pos) }
-            "L" { Write-Vt "$($script:E)[1;$($script:PinnedBottom)J" }
+            "L" {
+              # Wipe the pane and send the pane cursor back to the top, so the next
+              # command's output starts there.
+              Write-Vt "$($script:E)[1;1H$($script:E)[0J$($script:E)7"
+              $script:PaneEmpty = $true
+            }
           }
         } elseif ($k.KeyChar -ne [char]0 -and -not [Char]::IsControl($k.KeyChar)) {
           $buf = $buf.Insert($pos, $k.KeyChar)
@@ -1005,6 +1027,9 @@ function Invoke-ReplLine([string]$line) {
     return
   }
   if ($subCmd -in @("clear", "cls")) {
+    # Pane cursor back to the top, so the banner lands there instead of at the
+    # bottom margin (pinned mode only - Clear-Host is enough on its own otherwise).
+    $script:PaneEmpty = $true
     Clear-Host
     Show-Banner
     Write-Host ""
@@ -1036,10 +1061,13 @@ function Start-ReplPinned {
     # Ctrl-C as a *signal* could kill the process mid-region and leave the terminal
     # only scrolling its top rows; as input it's just another key to handle.
     try { [Console]::TreatControlCAsInput = $true } catch { }
-    Write-Vt "$($script:E)[2J$($script:E)[H" # start clean so nothing straddles the box
+    # Start clean, with the pane cursor seeded at the top of the screen.
+    Write-Vt "$($script:E)[2J$($script:E)[H$($script:E)7"
+    $script:PaneEmpty = $true
     Enable-PinnedRegion
     Enter-Pane
     Show-Intro
+    Save-PaneCursor
     while ($true) {
       $line = Read-PinnedLine
       if ($null -eq $line) { break }
@@ -1051,6 +1079,7 @@ function Start-ReplPinned {
       Write-Host -NoNewline "❯ " -ForegroundColor DarkYellow
       Write-Host $line
       Invoke-ReplLine $line
+      Save-PaneCursor
       if ($script:ReplQuit) { break }
     }
   } finally {

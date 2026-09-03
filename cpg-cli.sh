@@ -260,66 +260,76 @@ state_color() {
   esac
 }
 
+# One status line, fitted to the CURRENT terminal width. Split out of print_status so
+# a resize can re-render the same line at the new width instead of replaying the old
+# text (which then wrapped onto two rows) - see _cpg_status_refit.
+#
+# Full member list lives in `/detail <group>`; showing all of them here made the line
+# unreadably wide on anything but a maximized terminal. So: fit as many names as
+# actually fit, "+N lainnya" for the rest, "N container" if not even one name fits.
+_cpg_group_line() {
+  local group="$1" running="$2" total="$3" dormant="$4"
+  local svc_arr=() && read -ra svc_arr <<<"$5"
+  local total_svc=${#svc_arr[@]}
+  local state color plain_prefix dormant_note="" services
+  state=$(group_state "$running" "$total")
+  color=$(state_color "$state")
+  printf -v plain_prefix "  ● %-15s%2s/%-2s  " "$group" "$running" "$total"
+  # "+N profil" = services waiting behind a compose profile (see group_scan). Kept out
+  # of the counts on purpose, but worth advertising - it's the discoverable hint that
+  # those services exist at all.
+  (( dormant > 0 )) && dormant_note=", +$dormant profil"
+  local avail=$(( _CPG_COLS - ${#plain_prefix} - ${#dormant_note} ))
+  (( avail < 0 )) && avail=0
+
+  local shown=0 cur_str="" i candidate tentative remaining tentative_full
+  for (( i = 0; i < total_svc; i++ )); do
+    candidate="${svc_arr[$i]}"
+    if [[ -n "$cur_str" ]]; then tentative="$cur_str, $candidate"; else tentative="$candidate"; fi
+    remaining=$(( total_svc - (i + 1) ))
+    tentative_full="$tentative"
+    (( remaining > 0 )) && tentative_full="$tentative, +$remaining lainnya"
+    (( ${#tentative_full} > avail )) && break
+    cur_str="$tentative"
+    shown=$(( shown + 1 ))
+  done
+
+  if (( shown == 0 )); then
+    services="$total_svc container"
+  else
+    services="$cur_str"
+    remaining=$(( total_svc - shown ))
+    (( remaining > 0 )) && services="$services, +$remaining lainnya"
+  fi
+  services="$services$dormant_note"
+
+  printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
+    "$color" "$C_RESET" "$group" \
+    "$color" "$running" "$total" "$C_RESET" \
+    "$C_DIM" "$services" "$C_RESET"
+}
+
 print_status() {
   local filter="${1:-}"
   if [[ -n "$filter" ]]; then
     if ! filter=$(resolve_group_or_die "$filter"); then return 1; fi
   fi
-  local term_width
   _cpg_term_size
-  term_width=$_CPG_COLS
+  # Snapshot for the resize repaint: the counts and member list per group, so those
+  # lines can be re-fitted to a new width without re-querying docker. Written to a
+  # file, not a variable - print_status runs inside _cpg_out's pipeline (a subshell).
+  local snap=""
+  [[ -n "$_CPG_LOG" ]] && snap="$_CPG_LOG.status"
+  [[ -n "$snap" && -z "$filter" ]] && : > "$snap"
 
   for group in "${GROUP_ORDER[@]}"; do
     [[ -n "$filter" && "$group" != "$filter" ]] && continue
     group_scan "$group"
-    local running=$G_RUNNING total=$G_TOTAL dormant=$G_DORMANT
-    local state; state=$(group_state "$running" "$total")
-    local color; color=$(state_color "$state")
-
-    # Full member list lives in `/detail <group>` - showing all of them here made the
-    # line unreadably wide on anything but a maximized terminal. Fit as many names as
-    # actually fit the current terminal width, "+N lainnya" for the rest - re-measured
-    # every render, so it re-flows on the next redraw after a resize (same story as
-    # `hr`: this isn't a live mid-resize repaint either).
-    local plain_prefix
-    printf -v plain_prefix "  ● %-15s%2s/%-2s  " "$group" "$running" "$total"
-    # "+N profil" = services waiting behind a compose profile (see group_scan). Kept
-    # out of the counts on purpose, but worth advertising - that's the discoverable
-    # hint that `start <group> --all` exists.
-    local dormant_note=""
-    (( dormant > 0 )) && dormant_note=", +$dormant profil"
-    local avail=$(( term_width - ${#plain_prefix} - ${#dormant_note} ))
-    (( avail < 0 )) && avail=0
-
-    local svc_arr=() total_svc=$total
-    (( total_svc > 0 )) && svc_arr=("${G_ACTIVE[@]}")
-    local shown=() cur_str="" i candidate tentative remaining tentative_full
-    for (( i = 0; i < total_svc; i++ )); do
-      candidate="${svc_arr[$i]}"
-      if [[ -n "$cur_str" ]]; then tentative="$cur_str, $candidate"; else tentative="$candidate"; fi
-      remaining=$(( total_svc - (i + 1) ))
-      tentative_full="$tentative"
-      (( remaining > 0 )) && tentative_full="$tentative, +$remaining lainnya"
-      (( ${#tentative_full} > avail )) && break
-      cur_str="$tentative"
-      shown+=("$candidate")
-    done
-
-    local services
-    if [[ ${#shown[@]} -eq 0 ]]; then
-      # Not even one name fits - just say how many there are.
-      services="$total_svc container"
-    else
-      services="$cur_str"
-      remaining=$(( total_svc - ${#shown[@]} ))
-      (( remaining > 0 )) && services="$services, +$remaining lainnya"
+    if [[ -n "$snap" ]]; then
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$group" "$G_RUNNING" "$G_TOTAL" "$G_DORMANT" "${G_ACTIVE[*]:-}" >> "$snap"
     fi
-    services="$services$dormant_note"
-
-    printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
-      "$color" "$C_RESET" "$group" \
-      "$color" "$running" "$total" "$C_RESET" \
-      "$C_DIM" "$services" "$C_RESET"
+    _cpg_group_line "$group" "$G_RUNNING" "$G_TOTAL" "$G_DORMANT" "${G_ACTIVE[*]:-}"
   done
 }
 
@@ -898,10 +908,19 @@ _cpg_region_off() {
 # pane is a pipe rather than a tty, so `docker compose` prints plain progress lines
 # instead of its live-redrawing ones.
 _cpg_out() {
-  printf '\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
+  local sep=0
+  [[ -s "$_CPG_LOG" ]] && sep=1
+  # DECRC (ESC 8) puts the cursor back where the last pane output ended, so a fresh
+  # or just-cleared pane fills from the TOP and only starts scrolling once it's full
+  # - output used to be nailed to the bottom margin, which left the banner floating
+  # at the bottom of an otherwise empty screen. DECSTBM homes the cursor, hence the
+  # restore right after it. The terminal is the one tracking that position, so it
+  # stays right through wrapped lines.
+  printf '\033[1;%dr\0338' "$_CPG_BOTTOM"
   if [[ -z "$_CPG_LOG" ]]; then
-    printf '\n'
+    (( sep )) && printf '\n'
     "$@"
+    printf '\0337'
     return
   fi
   # Bounded: only the last screenful is ever replayed, so keep the tail and drop the
@@ -910,22 +929,64 @@ _cpg_out() {
     tail -n 500 "$_CPG_LOG" > "$_CPG_LOG.trim" 2>/dev/null && mv "$_CPG_LOG.trim" "$_CPG_LOG"
   fi
   # pipefail (set at the top of the script) keeps the command's own status instead of
-  # tee's, so `/exit` still reports "leave the REPL" through this.
-  { printf '\n'; "$@" 2>&1; } | tee -a "$_CPG_LOG"
+  # tee's, so `/exit` still reports "leave the REPL" through this. The blank
+  # separator line is skipped while the pane is still empty, so the banner starts on
+  # row 1 rather than row 2.
+  { (( sep )) && printf '\n'; "$@" 2>&1; } | tee -a "$_CPG_LOG"
+  local rc=$?
+  printf '\0337'
+  return "$rc"
 }
 
 # Wipes the screen and replays the last screenful of the mirror, ending at the scroll
 # region's bottom margin (where fresh output lands too). Used after a resize, once the
 # emulator has reflowed the pane and left our old box rows sitting in it.
-_cpg_repaint_pane() {
-  printf '\033[r\033[1;1H\033[0J\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
-  [[ -s "$_CPG_LOG" ]] || return 0
-  # Each line prints at the bottom margin and scrolls the previous ones up, so the
-  # replay ends exactly where the next command's output will continue from.
-  local line
-  while IFS= read -r line; do
+# Strips the colour escapes off a mirrored line, so it can be pattern-matched.
+# Regex, not `${s//pattern/}`: in a glob, `[0-9;]*` means "one of those, then
+# anything", so it happily ate the rest of the line (measured: the group name too).
+_cpg_plain() {
+  local s="$1" out=""
+  while [[ "$s" =~ ^([^$'\033']*)$'\033'\[[0-9\;]*[a-zA-Z](.*)$ ]]; do
+    out+="${BASH_REMATCH[1]}"
+    s="${BASH_REMATCH[2]}"
+  done
+  printf '%s' "$out$s"
+}
+
+# A replayed status line is text laid out for the OLD width, so after a resize it
+# wrapped onto two rows. Re-render it instead, from the snapshot print_status left
+# behind: same fit-as-many logic, new width, still exactly one row. Anything else
+# (docker output, /detail) replays as-is - it's plain prose, not a fitted list.
+_cpg_status_refit() {
+  local line="$1" plain group running total dormant services snap="$_CPG_LOG.status"
+  [[ -s "$snap" ]] || { printf '%s\n' "$line"; return 0; }
+  plain=$(_cpg_plain "$line")
+  if [[ ! "$plain" =~ ^[[:space:]]+●[[:space:]]+([a-z][a-z-]*)[[:space:]] ]]; then
     printf '%s\n' "$line"
-  done < <(tail -n "$_CPG_BOTTOM" "$_CPG_LOG")
+    return 0
+  fi
+  group="${BASH_REMATCH[1]}"
+  while IFS=$'\t' read -r g running total dormant services; do
+    if [[ "$g" == "$group" ]]; then
+      _cpg_group_line "$group" "$running" "$total" "$dormant" "$services"
+      return 0
+    fi
+  done < "$snap"
+  printf '%s\n' "$line"
+}
+
+_cpg_repaint_pane() {
+  printf '\033[r\033[1;1H\033[0J\033[1;%dr\033[1;1H' "$_CPG_BOTTOM"
+  # Replayed from row 1 down, same as a fresh pane: short output stays at the top,
+  # a full screenful scrolls itself into place. DECSC (ESC 7) at the end hands the
+  # position back to _cpg_out for the next command.
+  if [[ -s "$_CPG_LOG" ]]; then
+    local line
+    while IFS= read -r line; do
+      _cpg_status_refit "$line"
+    done < <(tail -n "$_CPG_BOTTOM" "$_CPG_LOG")
+  fi
+  printf '\0337'
 }
 
 # Repaints the 4 pinned rows (hint, box top, input, box bottom) and parks the cursor
@@ -1020,9 +1081,10 @@ _cpg_read_line() {
       $'\013') _CPG_BUF="${_CPG_BUF:0:_CPG_POS}" ;;     # Ctrl-K
       $'\025') _CPG_BUF="${_CPG_BUF:_CPG_POS}"; _CPG_POS=0 ;; # Ctrl-U
       $'\014') # Ctrl-L: wipe the pane, and the mirror with it - otherwise the next
-        # resize replays exactly what was just cleared.
+        # resize replays exactly what was just cleared. Pane cursor goes back to the
+        # top, so the next command's output starts there.
         [[ -n "$_CPG_LOG" ]] && : > "$_CPG_LOG"
-        printf '\033[1;%dJ' "$_CPG_BOTTOM" ;;
+        printf '\033[1;1H\033[0J\0337' ;;
       $'\t')
         _CPG_CL="$_CPG_BUF"; _CPG_CP=$_CPG_POS
         _cpg_complete_core
@@ -1137,9 +1199,9 @@ _cpg_run_line() {
 repl_pinned() {
   _cpg_term_size
   _CPG_LOG=$(mktemp -t cpg-pane 2>/dev/null) || _CPG_LOG=""
-  trap '_cpg_region_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim"' EXIT
+  trap '_cpg_region_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"' EXIT
   trap '_CPG_WINCH=1' WINCH
-  printf '\033[2J\033[H' # start clean so nothing straddles the pinned box
+  printf '\033[2J\033[H\0337' # start clean, pane cursor at the top of the screen
   _cpg_region_on
   _cpg_out _cpg_intro
   local line
@@ -1151,7 +1213,7 @@ repl_pinned() {
     if ! _cpg_out _cpg_run_line "$line"; then break; fi
   done
   _cpg_region_off
-  [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim"
+  [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"
   trap - EXIT WINCH
   echo "Bye."
 }
