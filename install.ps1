@@ -12,6 +12,33 @@
 #>
 $ErrorActionPreference = "Stop"
 
+# Everything cpg drives is docker compose - no point wiring up the command if either
+# piece is missing. Offers a best-effort install via winget, but always leaves the
+# final call (and the UAC prompt) to the user.
+function Test-DockerAvailable {
+  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $false }
+  docker compose version *> $null
+  return $LASTEXITCODE -eq 0
+}
+
+if (-not (Test-DockerAvailable)) {
+  Write-Host "Docker (or the 'docker compose' plugin) isn't available on this machine."
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    $yn = Read-Host "Install Docker Desktop now via winget? (y/n)"
+    if ($yn -match '^[Yy]') {
+      winget install -e --id Docker.DockerDesktop
+      Write-Host ""
+      Write-Host "Installed (or install started). Open Docker Desktop once from the Start"
+      Write-Host "Menu and wait for it to say `"running`", then re-run this installer"
+      Write-Host "(./install.ps1)."
+      exit 0
+    }
+  }
+  Write-Host "Install Docker yourself: https://docs.docker.com/get-docker/"
+  Write-Host "(the compose plugin comes bundled with any current Docker install)"
+  exit 1
+}
+
 $RepoRoot = $PSScriptRoot
 $InstallDir = Join-Path $HOME ".local\bin"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null

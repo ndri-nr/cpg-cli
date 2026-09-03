@@ -32,6 +32,11 @@ curl -fsSL https://raw.githubusercontent.com/ndri-nr/cpg-cli/main/install-remote
 Already have the repo cloned? Just run `./install.sh` (or `./install.ps1`)
 from inside it instead - same result, skips the clone/pull step.
 
+The installer checks for Docker + the `docker compose` plugin first, since
+everything `cpg` drives depends on them - if either is missing it offers to
+install Docker for you (via `winget` on Windows, `brew` on macOS, or the
+official convenience script on Linux), asking before it runs anything.
+
 Open a new terminal afterwards if the installer says it updated your PATH.
 Then from anywhere:
 
