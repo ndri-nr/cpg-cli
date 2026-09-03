@@ -38,7 +38,14 @@ STEPS = [
     (b"\x15/s\t", "Tab with several matches"),
     (b"\x15abc\x1b[D\x1b[Dx", "insert in the middle"),
     (b"\x15\r", "Enter on an empty line"),
+    (b"\x1b[1;2A", "Shift-Up (scroll back)"),
+    (b"\x1b[1;2B", "Shift-Down"),
+    (b"\x1b[1;2B\x1b[1;2B", "Shift-Down past the bottom"),
+    (b"\x1b[<64;10;10M", "stray SGR mouse report (ignored)"),
     (b"/status\r", "a real command"),
+    (b"\x1b[1;2A\x1b[1;2A", "scroll back over real output"),
+    (b"z", "typing jumps back to the newest line"),
+    (b"\x15", "clear the line"),
     (b"/exit\r", "exit"),
 ]
 
@@ -101,6 +108,9 @@ def main():
         print(f"FAIL: exited {os.waitstatus_to_exitcode(status)}, expected 0")
         return 1
     # The scroll region must be released, or the terminal is left broken.
+    if "\x1b[?1049h" in text and "\x1b[?1049l" not in text:
+        print("FAIL: never left the alternate screen")
+        return 1
     if "\x1b[r" not in text:
         print("FAIL: scroll region never reset (missing ESC[r)")
         return 1

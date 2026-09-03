@@ -78,12 +78,25 @@ contoh: /status, /start db, /detail, /help
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The box really is pinned: the terminal's own scroll region is cut just above
-it, so a long `docker compose` run scrolls in the top pane while the prompt
-stays put, and resizing the window re-cuts and repaints it live. Line editing
-is ours rather than readline's: left/right, Home/End, backspace/delete,
-up/down history, Tab completion, Ctrl-A/E/U/K, Ctrl-L to wipe the top pane,
-Ctrl-C or Ctrl-D to leave.
+The box really is pinned - against command output *and* against scrolling. The
+shell runs on the alternate screen with the terminal's own scroll region cut
+just above the box, so a long `docker compose` run scrolls in the pane above
+while the prompt stays put, and there's no terminal scrollback to slide the box
+out of view. Looking back through output is **Shift+↑ / Shift+↓** (works the
+same on macOS and Windows, no PageUp key needed); typing anything, or holding
+Shift+↓, returns to the newest line, and the hint line shows how far up you
+are. Resizing re-cuts and repaints live, re-fitting the status lines.
+
+No mouse tracking is enabled, on purpose: that would take plain drags away from
+the terminal and break text selection. So select and copy work as they do
+anywhere else, and the wheel simply does nothing here. On exit the session's
+output is handed to the real scrollback, so leaving doesn't throw it away.
+`CPG_ALTSCREEN=0` stays on the normal screen instead (the wheel scrolls the
+window again, and takes the box with it).
+
+Line editing is ours rather than readline's: left/right, Home/End,
+backspace/delete, up/down history, Tab completion, Ctrl-A/E/U/K, Ctrl-L to wipe
+the pane, Ctrl-C or Ctrl-D to leave.
 
 Needs a terminal it can measure and address (and bash 4+ for `cpg-cli.sh` -
 macOS ships bash 3.2, so `brew install bash`). Anywhere it can't - piped
