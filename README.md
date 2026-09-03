@@ -207,7 +207,7 @@ flowchart LR
     subgraph cache ["cpg-cache (project + network)"]
         redis[redis<br/>:6379]
         redisinsight[redis-insight<br/>:5540]
-        rediscluster["redis-cluster-1..6<br/>:7000-7005 (profile)"]
+        rediscluster["redis-cluster-1..6<br/>:17001-17006 (profile)"]
         redisinsight --> redis
     end
 
@@ -245,7 +245,7 @@ flowchart LR
 | Database | `mongo-replica-1/2` | 27019 / 27020 | `--profile mongo-cluster`. Initial-sync from primary. |
 | Database | `mongo-express` | 8888 | Web UI for `mongo-primary`. |
 | Cache | `redis` | 6379 | Single-node. |
-| Cache | `redis-cluster-1..6` | 7000-7005 | `--profile redis-cluster`. Real 3 masters + 3 replicas. |
+| Cache | `redis-cluster-1..6` | 17001-17006 | `--profile redis-cluster`. Real 3 masters + 3 replicas. Bus on 27001-27006. Not the usual 7000-7005: macOS AirPlay Receiver owns 7000. |
 | Cache | `redis-insight` | 5540 | Redis GUI. |
 | Messaging | `rabbitmq` | 5672 / 15672 (mgmt UI) | |
 | Observability | `otel-collector` | 4317 (gRPC) / 4318 (HTTP) | |

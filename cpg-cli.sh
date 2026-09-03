@@ -601,8 +601,9 @@ redis-insight  (web UI, no login by default)
   add connection inside using: host=localhost, port=6379, pass=password
 
 redis-cluster-1..6  (profile: redis-cluster)
-  hosts: localhost:7000-7005   pass: password
-  cli:   redis-cli -c -h localhost -p 7000 -a password   (-c follows MOVED redirects)
+  hosts: localhost:17001-17006   pass: password   (bus: 27001-27006)
+  cli:   redis-cli -c -h localhost -p 17001 -a password  (-c follows MOVED redirects)
+  ports geser dari 7000-7005 - macOS AirPlay Receiver nempatin 7000 & 5000
 EOF
       ;;
     messaging)

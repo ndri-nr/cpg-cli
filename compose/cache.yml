@@ -48,9 +48,9 @@ services:
     profiles: ["redis-cluster"]
     command: >
       redis-server
-      --port 7000
+      --port 17001
       --cluster-enabled yes
-      --cluster-config-file nodes-7000.conf
+      --cluster-config-file nodes-17001.conf
       --cluster-node-timeout 5000
       --cluster-announce-ip 127.0.0.1
       --appendonly yes
@@ -58,12 +58,15 @@ services:
       --requirepass password
       --masterauth password
     ports:
-      - "7000-7005:7000-7005"
-      - "17000-17005:17000-17005"
+      # 17001-17006, not the usual 7000-7005: macOS's AirPlay Receiver (ControlCenter)
+      # listens on 7000 and 5000, so a cluster there fails to bind out of the box.
+      # The cluster bus is always node port + 10000, hence the second range.
+      - "17001-17006:17001-17006"
+      - "27001-27006:27001-27006"
     volumes:
       - redis_cluster_data_1:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "7000", "-a", "password", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-p", "17001", "-a", "password", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -78,9 +81,9 @@ services:
       - redis-cluster-1
     command: >
       redis-server
-      --port 7001
+      --port 17002
       --cluster-enabled yes
-      --cluster-config-file nodes-7001.conf
+      --cluster-config-file nodes-17002.conf
       --cluster-node-timeout 5000
       --cluster-announce-ip 127.0.0.1
       --appendonly yes
@@ -90,7 +93,7 @@ services:
     volumes:
       - redis_cluster_data_2:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "7001", "-a", "password", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-p", "17002", "-a", "password", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -105,9 +108,9 @@ services:
       - redis-cluster-1
     command: >
       redis-server
-      --port 7002
+      --port 17003
       --cluster-enabled yes
-      --cluster-config-file nodes-7002.conf
+      --cluster-config-file nodes-17003.conf
       --cluster-node-timeout 5000
       --cluster-announce-ip 127.0.0.1
       --appendonly yes
@@ -117,7 +120,7 @@ services:
     volumes:
       - redis_cluster_data_3:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "7002", "-a", "password", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-p", "17003", "-a", "password", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -132,9 +135,9 @@ services:
       - redis-cluster-1
     command: >
       redis-server
-      --port 7003
+      --port 17004
       --cluster-enabled yes
-      --cluster-config-file nodes-7003.conf
+      --cluster-config-file nodes-17004.conf
       --cluster-node-timeout 5000
       --cluster-announce-ip 127.0.0.1
       --appendonly yes
@@ -144,7 +147,7 @@ services:
     volumes:
       - redis_cluster_data_4:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "7003", "-a", "password", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-p", "17004", "-a", "password", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -159,9 +162,9 @@ services:
       - redis-cluster-1
     command: >
       redis-server
-      --port 7004
+      --port 17005
       --cluster-enabled yes
-      --cluster-config-file nodes-7004.conf
+      --cluster-config-file nodes-17005.conf
       --cluster-node-timeout 5000
       --cluster-announce-ip 127.0.0.1
       --appendonly yes
@@ -171,7 +174,7 @@ services:
     volumes:
       - redis_cluster_data_5:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "7004", "-a", "password", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-p", "17005", "-a", "password", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -186,9 +189,9 @@ services:
       - redis-cluster-1
     command: >
       redis-server
-      --port 7005
+      --port 17006
       --cluster-enabled yes
-      --cluster-config-file nodes-7005.conf
+      --cluster-config-file nodes-17006.conf
       --cluster-node-timeout 5000
       --cluster-announce-ip 127.0.0.1
       --appendonly yes
@@ -198,7 +201,7 @@ services:
     volumes:
       - redis_cluster_data_6:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-p", "7005", "-a", "password", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-p", "17006", "-a", "password", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -231,8 +234,8 @@ services:
       - -c
       - >
         redis-cli -a password --no-auth-warning --cluster create
-        127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002
-        127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005
+        127.0.0.1:17001 127.0.0.1:17002 127.0.0.1:17003
+        127.0.0.1:17004 127.0.0.1:17005 127.0.0.1:17006
         --cluster-replicas 1 --cluster-yes
         || echo "Cluster already initialized, skipping."
     restart: "no"
