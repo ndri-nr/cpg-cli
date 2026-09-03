@@ -59,6 +59,22 @@ declare -A SVC_GROUPS=(
 declare -A GROUP_DEPENDS=(
   [ai]="database cache"
 )
+# Services that only exist once a compose profile is switched on (replicas, cluster
+# nodes). Two jobs: status must not count a service nobody ever created - counting
+# them is what pinned `database` at 4/9 forever, unreachable by `cpg start db` - and
+# `start --all` needs to know which profiles bring the whole group up.
+declare -A SVC_PROFILE=(
+  [postgres-replica-1]=postgres-replica [postgres-replica-2]=postgres-replica
+  [pgpool]=postgres-replica
+  [mongo-replica-1]=mongo-cluster [mongo-replica-2]=mongo-cluster
+  [redis-cluster-1]=redis-cluster [redis-cluster-2]=redis-cluster
+  [redis-cluster-3]=redis-cluster [redis-cluster-4]=redis-cluster
+  [redis-cluster-5]=redis-cluster [redis-cluster-6]=redis-cluster
+)
+declare -A GROUP_PROFILES=(
+  [database]="postgres-replica mongo-cluster"
+  [cache]="redis-cluster"
+)
 GROUP_ORDER=(database cache messaging observability quality ai)
 
 declare -A GROUP_ALIAS=(
@@ -81,7 +97,9 @@ declare -A CMD_ALIAS=(
   [remove]=uninstall [unlink]=uninstall
 )
 CMDS=(status start stop restart detail update uninstall)
+ALL_FLAG=0; FLAG_REST=() # filled by _take_flags
 IN_REPL=0 # flipped to 1 inside repl() - lets do_update know whether to self-relaunch
+G_RUNNING=0; G_TOTAL=0; G_DORMANT=0; G_ACTIVE=() # filled by group_scan
 
 if [[ -t 1 ]]; then
   C_GREEN=$'\033[0;32m'; C_YELLOW=$'\033[0;33m'; C_RED=$'\033[0;31m'
@@ -176,19 +194,53 @@ running_services_of() {
   dc "$1" ps --services --status running 2>/dev/null
 }
 
+# "<service> <state>" per existing container, one `compose ps` for the whole group.
+# `-a` on purpose: a created-but-stopped container still proves its profile was
+# switched on at some point, which is what the denominator below keys off.
+group_ps() {
+  dc "$1" ps -a --format '{{.Service}} {{.State}}' 2>/dev/null
+}
+
 network_exists() {
   docker network inspect "cpg-$1" >/dev/null 2>&1
 }
 
+# One `compose ps` per group, feeding every number the status view needs, in globals
+# (a command substitution would run this in a subshell and throw the arrays away):
+#   G_RUNNING / G_TOTAL - the counts
+#   G_ACTIVE            - the services those counts cover
+#   G_DORMANT           - profile-gated services that don't exist yet
+#
+# The denominator is what's actually reachable, not every service in the file:
+# profile-gated services join it only once a container for them exists (someone ran
+# `start --all` or a manual `--profile` compose command). Counting them regardless is
+# what pinned `database` at 4/9 forever - 5 of its 9 services live behind
+# `postgres-replica` / `mongo-cluster`, so plain `cpg start db` could never reach 9.
+group_scan() {
+  local group="$1" svc s st
+  local -A state=()
+  G_RUNNING=0; G_TOTAL=0; G_DORMANT=0; G_ACTIVE=()
+  # `if`, not `[[ ... ]] && ...`: a group with no containers at all feeds one empty
+  # line here, and a false test as the loop body's last command makes the whole
+  # `while` return 1 - which `set -e` turns into a silent exit mid-status.
+  while read -r s st; do
+    if [[ -n "$s" ]]; then state[$s]="$st"; fi
+  done <<<"$(group_ps "$group")"
+  for svc in ${SVC_GROUPS[$group]}; do
+    if [[ -z "${state[$svc]:-}" && -n "${SVC_PROFILE[$svc]:-}" ]]; then
+      G_DORMANT=$((G_DORMANT + 1))
+      continue
+    fi
+    G_TOTAL=$((G_TOTAL + 1))
+    G_ACTIVE+=("$svc")
+    if [[ "${state[$svc]:-}" == "running" ]]; then G_RUNNING=$((G_RUNNING + 1)); fi
+  done
+}
+
 # group_counts <group> -> prints "running total" (space-separated)
 group_counts() {
-  local group="$1" running_list total=0 running=0
-  running_list="$(running_services_of "$group")"
-  for svc in ${SVC_GROUPS[$group]}; do
-    total=$((total + 1))
-    grep -qx "$svc" <<<"$running_list" && running=$((running + 1))
-  done
-  echo "$running $total"
+  group_scan "$1"
+  echo "$G_RUNNING $G_TOTAL"
 }
 
 # state: up | down | partial
@@ -219,7 +271,8 @@ print_status() {
 
   for group in "${GROUP_ORDER[@]}"; do
     [[ -n "$filter" && "$group" != "$filter" ]] && continue
-    read -r running total <<<"$(group_counts "$group")"
+    group_scan "$group"
+    local running=$G_RUNNING total=$G_TOTAL dormant=$G_DORMANT
     local state; state=$(group_state "$running" "$total")
     local color; color=$(state_color "$state")
 
@@ -230,10 +283,16 @@ print_status() {
     # `hr`: this isn't a live mid-resize repaint either).
     local plain_prefix
     printf -v plain_prefix "  ● %-15s%2s/%-2s  " "$group" "$running" "$total"
-    local avail=$(( term_width - ${#plain_prefix} ))
+    # "+N profil" = services waiting behind a compose profile (see group_scan). Kept
+    # out of the counts on purpose, but worth advertising - that's the discoverable
+    # hint that `start <group> --all` exists.
+    local dormant_note=""
+    (( dormant > 0 )) && dormant_note=", +$dormant profil"
+    local avail=$(( term_width - ${#plain_prefix} - ${#dormant_note} ))
     (( avail < 0 )) && avail=0
 
-    local svc_arr=(${SVC_GROUPS[$group]}) total_svc=${#svc_arr[@]}
+    local svc_arr=() total_svc=$total
+    (( total_svc > 0 )) && svc_arr=("${G_ACTIVE[@]}")
     local shown=() cur_str="" i candidate tentative remaining tentative_full
     for (( i = 0; i < total_svc; i++ )); do
       candidate="${svc_arr[$i]}"
@@ -255,6 +314,7 @@ print_status() {
       remaining=$(( total_svc - ${#shown[@]} ))
       (( remaining > 0 )) && services="$services, +$remaining lainnya"
     fi
+    services="$services$dormant_note"
 
     printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
       "$color" "$C_RESET" "$group" \
@@ -293,9 +353,9 @@ project compose terpisah (compose/<grup>.yml) - keliatan sbg baris sendiri2 di
 Usage:
   $0                    masuk interactive shell (prompt cpg>, ketik /status /start dst berulang)
   $0 status [grup]      liat status (semua grup, atau 1 grup doang)
-  $0 start  [grup]      nyalain grup (tanpa nama -> pilih dari yg belum full up)
+  $0 start  [grup] [--all]   nyalain grup (tanpa nama -> pilih dari yg belum full up)
   $0 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
-  $0 restart [grup]
+  $0 restart [grup] [--all]
   $0 detail [grup]      connection info (host/port/user/pass/URI) per service
   $0 update             git pull cpg-cli itself + refresh the cpg wrapper
   $0 uninstall          remove the cpg command (repo/containers/data untouched)
@@ -308,6 +368,12 @@ Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
+
+--all (alias: -a, all, full, semua) nyalain service yang ada di balik compose
+profile juga: replica Postgres + pgpool (profile postgres-replica), replica set
+Mongo (mongo-cluster), 6 node Redis cluster (redis-cluster). Tanpa --all mereka
+gak kebikin - makanya status cuma ngitung yang beneran ada, dan nunjukin
+"+N profil" buat sisanya.
 EOF
 }
 
@@ -325,17 +391,51 @@ ensure_dependencies() {
   done
 }
 
+# Splits an "--all" style token out of a group list: sets ALL_FLAG and FLAG_REST
+# (globals, so the caller keeps the array - a command substitution would flatten it).
+_take_flags() {
+  local w
+  ALL_FLAG=0
+  FLAG_REST=()
+  for w in "$@"; do
+    case "$w" in
+      --all|-a|all|full|semua) ALL_FLAG=1 ;;
+      *) FLAG_REST+=("$w") ;;
+    esac
+  done
+}
+
 # Every early-out below uses `return`, never `exit` - these run inside the REPL loop
 # too, where `exit` would kill the whole shell instead of just aborting one command.
 _start_one() {
-  local group="$1"
+  local group="$1" all="${2:-0}" p profile_args=()
   ensure_dependencies "$group"
+
+  if [[ "$all" == "1" ]]; then
+    for p in ${GROUP_PROFILES[$group]:-}; do profile_args+=(--profile "$p"); done
+  fi
+  if (( ${#profile_args[@]} > 0 )); then
+    # Straight to `up -d`, no `start` first: with profiles on, the containers usually
+    # don't exist yet and `up` is what creates them (and pulls their images). Profile
+    # flags belong before the subcommand: `docker compose --profile x up -d`.
+    echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} ${profile_args[*]} up -d"
+    dc "$group" "${profile_args[@]}" up -d
+    return
+  fi
+
   echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} start ${SVC_GROUPS[$group]}"
   # `start` only works on containers that already exist - first-ever run falls back to
   # `up -d` to actually create them. Only the fallback's stderr is worth hiding here.
   # shellcheck disable=SC2086
   if ! dc "$group" start ${SVC_GROUPS[$group]}; then
     dc "$group" up -d
+  fi
+  # Say it out loud, once, where it's actionable: a plain start leaves the
+  # profile-gated services (replicas, cluster nodes) untouched, so the group reads
+  # "up" without them and there's no other hint they exist.
+  group_scan "$group"
+  if (( G_DORMANT > 0 )); then
+    echo "${C_DIM}  (+$G_DORMANT service di balik profile - 'cpg start $group --all' kalo mau ikut nyala)${C_RESET}"
   fi
 }
 
@@ -344,7 +444,8 @@ _start_one() {
 # started independently; a bad name in the middle just gets skipped (with a message)
 # instead of aborting the rest of the batch.
 do_start() {
-  local groups=("$@")
+  _take_flags "$@"
+  local groups=("${FLAG_REST[@]+"${FLAG_REST[@]}"}")
   if [[ ${#groups[@]} -eq 0 ]]; then
     local candidates=()
     for g in "${GROUP_ORDER[@]}"; do
@@ -363,7 +464,7 @@ do_start() {
   local g resolved rc=0
   for g in "${groups[@]}"; do
     if ! resolved=$(resolve_group_or_die "$g"); then rc=1; continue; fi
-    _start_one "$resolved"
+    _start_one "$resolved" "$ALL_FLAG"
   done
   return "$rc"
 }
@@ -376,7 +477,11 @@ _stop_one() {
 }
 
 do_stop() {
-  local groups=("$@")
+  # `stop` needs no profile flags (compose stops profile-gated containers by name
+  # just fine), but accept and drop the token so `/stop db --all` isn't read as a
+  # group named "--all".
+  _take_flags "$@"
+  local groups=("${FLAG_REST[@]+"${FLAG_REST[@]}"}")
   if [[ ${#groups[@]} -eq 0 ]]; then
     local candidates=()
     for g in "${GROUP_ORDER[@]}"; do
@@ -401,15 +506,24 @@ do_stop() {
 }
 
 _restart_one() {
-  local group="$1"
+  local group="$1" all="${2:-0}"
   ensure_dependencies "$group"
+  if [[ "$all" == "1" ]]; then
+    # `restart` can't create anything, and with --all the profile-gated containers
+    # may not exist yet - so stop what's up and bring the whole group up instead.
+    # shellcheck disable=SC2086
+    dc "$group" stop ${SVC_GROUPS[$group]} >/dev/null 2>&1 || true
+    _start_one "$group" 1
+    return
+  fi
   echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} restart ${SVC_GROUPS[$group]}"
   # shellcheck disable=SC2086
   dc "$group" restart ${SVC_GROUPS[$group]}
 }
 
 do_restart() {
-  local groups=("$@")
+  _take_flags "$@"
+  local groups=("${FLAG_REST[@]+"${FLAG_REST[@]}"}")
   if [[ ${#groups[@]} -eq 0 ]]; then
     local picked
     if ! picked=$(menu "Grup mana yang mau di-restart?" "${GROUP_ORDER[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
@@ -419,7 +533,7 @@ do_restart() {
   local g resolved rc=0
   for g in "${groups[@]}"; do
     if ! resolved=$(resolve_group_or_die "$g"); then rc=1; continue; fi
-    _restart_one "$resolved"
+    _restart_one "$resolved" "$ALL_FLAG"
   done
   return "$rc"
 }
@@ -787,17 +901,35 @@ _cpg_render() {
   printf '\033[%d;%dH' $(( _CPG_ROWS - 1 )) $(( _CPG_POS - start + 5 ))
 }
 
+# Pushes the whole visible screen up into the scrollback: margins off (a full-screen
+# scroll is the only kind the emulator keeps), one newline per row, done. Used after a
+# shrink, where the old box rows get reflowed up into the scroll pane and would sit
+# there as leftover borders stacking under the new box - the emulator never says how
+# it reflowed, and nothing here mirrors the pane's content to repaint it. The output
+# isn't lost, it's one scroll up.
+_cpg_flush_screen() {
+  local i
+  printf '\033[r\033[%d;1H' "$_CPG_ROWS"
+  for (( i = 0; i < _CPG_ROWS; i++ )); do
+    printf '\n'
+  done
+}
+
 # Re-measures once per idle second and repaints only when the window really changed.
-# On resize the emulator reflows the top pane itself; all we have to do is re-cut the
-# region and repaint the box at the new bottom.
 _cpg_poll_resize() {
   local pr=$_CPG_ROWS pc=$_CPG_COLS
   _cpg_term_size
-  if (( pr != _CPG_ROWS || pc != _CPG_COLS )); then
-    printf '\033[1;%dr' "$_CPG_BOTTOM"
-    _cpg_render
+  if (( pr == _CPG_ROWS && pc == _CPG_COLS )); then
+    return 0
   fi
-  :
+  # Only a shrink (or any width change, which re-wraps every line in the pane) leaves
+  # stale rows behind. Growing taller just hands us blank rows at the bottom, so the
+  # pane is still intact - re-cut and repaint, keep the output on screen.
+  if (( _CPG_ROWS < pr || _CPG_COLS != pc )); then
+    _cpg_flush_screen
+  fi
+  printf '\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
+  _cpg_render
 }
 
 # Raw line editor: everything `read -e` gave us for free, by hand. Sets _CPG_LINE and
@@ -857,7 +989,7 @@ _cpg_read_line() {
         case "$seq" in
           '[A'|'OA') # history back
             if (( hidx > 0 )); then
-              (( hidx == ${#_CPG_HIST[@]} )) && saved="$_CPG_BUF"
+              if (( hidx == ${#_CPG_HIST[@]} )); then saved="$_CPG_BUF"; fi
               hidx=$(( hidx - 1 ))
               _CPG_BUF="${_CPG_HIST[hidx]}"
               _CPG_POS=${#_CPG_BUF}
@@ -872,8 +1004,11 @@ _cpg_read_line() {
               fi
               _CPG_POS=${#_CPG_BUF}
             fi ;;
-          '[C'|'OC') (( _CPG_POS < ${#_CPG_BUF} )) && _CPG_POS=$(( _CPG_POS + 1 )) ;;
-          '[D'|'OD') (( _CPG_POS > 0 )) && _CPG_POS=$(( _CPG_POS - 1 )) ;;
+          # `if`, not `test && assign`: a false test as the last command in a case
+          # branch makes the branch (and this whole loop body) return 1, and `set -e`
+          # then kills the REPL - pressing Left at column 0 used to do exactly that.
+          '[C'|'OC') if (( _CPG_POS < ${#_CPG_BUF} )); then _CPG_POS=$(( _CPG_POS + 1 )); fi ;;
+          '[D'|'OD') if (( _CPG_POS > 0 )); then _CPG_POS=$(( _CPG_POS - 1 )); fi ;;
           '[H'|'OH') _CPG_POS=0 ;;
           '[F'|'OF') _CPG_POS=${#_CPG_BUF} ;;
           # `ESC [ n ~` keys: the trailing `~` is still unread, so eat it.

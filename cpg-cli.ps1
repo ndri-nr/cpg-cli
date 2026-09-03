@@ -60,6 +60,23 @@ $GroupDepends = @{
   ai = @("database", "cache")
 }
 
+# Services that only exist once a compose profile is switched on (replicas, cluster
+# nodes). Two jobs: status must not count a service nobody ever created - counting
+# them is what pinned `database` at 4/9 forever, unreachable by `cpg start db` - and
+# `start --all` needs to know which profiles bring the whole group up.
+$SvcProfile = @{
+  "postgres-replica-1" = "postgres-replica"; "postgres-replica-2" = "postgres-replica"
+  "pgpool" = "postgres-replica"
+  "mongo-replica-1" = "mongo-cluster"; "mongo-replica-2" = "mongo-cluster"
+  "redis-cluster-1" = "redis-cluster"; "redis-cluster-2" = "redis-cluster"
+  "redis-cluster-3" = "redis-cluster"; "redis-cluster-4" = "redis-cluster"
+  "redis-cluster-5" = "redis-cluster"; "redis-cluster-6" = "redis-cluster"
+}
+$GroupProfiles = @{
+  database = @("postgres-replica", "mongo-cluster")
+  cache    = @("redis-cluster")
+}
+
 $GroupAlias = @{
   db = "database"; postgres = "database"; pg = "database"; sql = "database"; mongo = "database"
   redis = "cache"; caching = "cache"
@@ -156,13 +173,40 @@ function Test-NetworkExists([string]$groupName) {
   return $LASTEXITCODE -eq 0
 }
 
+# "<service> <state>" per existing container, one `compose ps` for the whole group.
+# `-a` on purpose: a created-but-stopped container still proves its profile was
+# switched on at some point, which is what the denominator below keys off.
+function Get-GroupPs([string]$groupName) {
+  $map = @{}
+  $lines = (Invoke-Compose $groupName @("ps", "-a", "--format", "{{.Service}} {{.State}}") 2>$null) -split "`n"
+  foreach ($line in $lines) {
+    $parts = $line.Trim() -split '\s+', 2
+    if ($parts[0]) { $map[$parts[0]] = if ($parts.Count -gt 1) { $parts[1] } else { "" } }
+  }
+  return $map
+}
+
+# The denominator is what's actually reachable, not every service in the file:
+# profile-gated services join it only once a container for them exists (someone ran
+# `start --all` or a manual `--profile` compose command). Counting them regardless is
+# what pinned `database` at 4/9 forever - 5 of its 9 services live behind
+# `postgres-replica` / `mongo-cluster`, so plain `cpg start db` could never reach 9.
 function Get-GroupState($groupName) {
-  $svcs = $SvcGroups[$groupName]
-  $runningList = Get-RunningServicesOf $groupName
-  $running = ($svcs | Where-Object { $runningList -contains $_ }).Count
-  $total = $svcs.Count
-  $state = if ($running -eq 0) { "down" } elseif ($running -eq $total) { "up" } else { "partial" }
-  [PSCustomObject]@{ Group = $groupName; Running = $running; Total = $total; State = $state; Services = $svcs }
+  $state = Get-GroupPs $groupName
+  $active = [System.Collections.Generic.List[string]]::new()
+  $running = 0
+  $dormant = 0
+  foreach ($svc in $SvcGroups[$groupName]) {
+    if (-not $state.ContainsKey($svc) -and $SvcProfile.ContainsKey($svc)) {
+      $dormant++
+      continue
+    }
+    $active.Add($svc)
+    if ($state[$svc] -eq "running") { $running++ }
+  }
+  $total = $active.Count
+  $st = if ($running -eq 0) { "down" } elseif ($running -eq $total) { "up" } else { "partial" }
+  [PSCustomObject]@{ Group = $groupName; Running = $running; Total = $total; State = $st; Services = $active; Dormant = $dormant }
 }
 
 function Write-GroupLine($info) {
@@ -179,7 +223,11 @@ function Write-GroupLine($info) {
   # mid-resize repaint either - see Get-Hr).
   $width = $Host.UI.RawUI.WindowSize.Width
   if (-not $width -or $width -lt 1) { $width = 80 }
-  $avail = [Math]::Max(0, $width - $plainPrefix.Length)
+  # "+N profil" = services waiting behind a compose profile (see Get-GroupState).
+  # Kept out of the counts on purpose, but worth advertising - that's the
+  # discoverable hint that `start <group> --all` exists.
+  $dormantNote = if ($info.Dormant -gt 0) { ", +$($info.Dormant) profil" } else { "" }
+  $avail = [Math]::Max(0, $width - $plainPrefix.Length - $dormantNote.Length)
 
   $shown = [System.Collections.Generic.List[string]]::new()
   $curStr = ""
@@ -201,7 +249,7 @@ function Write-GroupLine($info) {
     $remaining = $info.Services.Count - $shown.Count
     if ($remaining -gt 0) { $svcText += ", +$remaining lainnya" }
   }
-  Write-Host $svcText -ForegroundColor DarkGray
+  Write-Host ($svcText + $dormantNote) -ForegroundColor DarkGray
 }
 
 function Show-Status([string]$filter) {
@@ -237,9 +285,9 @@ project compose terpisah (compose/<grup>.yml) - keliatan sbg baris sendiri2 di
 Usage:
   ./cpg-cli.ps1                    masuk interactive shell (prompt cpg>, ketik /status /start dst berulang)
   ./cpg-cli.ps1 status [grup]      liat status (semua grup, atau 1 grup doang)
-  ./cpg-cli.ps1 start  [grup]      nyalain grup (tanpa nama -> pilih dari yg belum full up)
+  ./cpg-cli.ps1 start  [grup] [--all]   nyalain grup (tanpa nama -> pilih dari yg belum full up)
   ./cpg-cli.ps1 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
-  ./cpg-cli.ps1 restart [grup]
+  ./cpg-cli.ps1 restart [grup] [--all]
   ./cpg-cli.ps1 detail [grup]      connection info (host/port/user/pass/URI) per service
   ./cpg-cli.ps1 update             git pull cpg-cli itself + refresh the cpg wrapper
   ./cpg-cli.ps1 uninstall          remove the cpg command (repo/containers/data untouched)
@@ -248,9 +296,16 @@ Usage:
 Grup: $($SvcGroups.Keys -join ', ')
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
+Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
+
+--all (alias: -a, all, full, semua) nyalain service yang ada di balik compose
+profile juga: replica Postgres + pgpool (profile postgres-replica), replica set
+Mongo (mongo-cluster), 6 node Redis cluster (redis-cluster). Tanpa --all mereka
+gak kebikin - makanya status cuma ngitung yang beneran ada, dan nunjukin
+"+N profil" buat sisanya.
 "@
 }
 
@@ -267,15 +322,49 @@ function Ensure-Dependencies([string]$groupName) {
   }
 }
 
-function Invoke-StartOne([string]$groupName) {
+# Splits an "--all" style token out of a group list -> @{ All = $bool; Rest = @() }.
+function Split-AllFlag([string[]]$words) {
+  $all = $false
+  $rest = [System.Collections.Generic.List[string]]::new()
+  foreach ($w in @($words | Where-Object { $_ })) {
+    if ($w -in @("--all", "-a", "all", "full", "semua")) { $all = $true } else { $rest.Add($w) }
+  }
+  return @{ All = $all; Rest = @($rest) }
+}
+
+function Invoke-StartOne([string]$groupName, [bool]$All = $false) {
   Ensure-Dependencies $groupName
   $svcs = $SvcGroups[$groupName]
+
+  $profileArgs = @()
+  if ($All) {
+    foreach ($p in @($GroupProfiles[$groupName])) {
+      if ($p) { $profileArgs += @("--profile", $p) }
+    }
+  }
+  if ($profileArgs.Count -gt 0) {
+    # Straight to `up -d`, no `start` first: with profiles on, the containers usually
+    # don't exist yet and `up` is what creates them (and pulls their images). Profile
+    # flags belong before the subcommand: `docker compose --profile x up -d`.
+    Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
+    Write-Host "docker compose -f $($GroupFile[$groupName]) $($profileArgs -join ' ') up -d"
+    Invoke-Compose $groupName ($profileArgs + @("up", "-d"))
+    return
+  }
+
   Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
   Write-Host "docker compose -f $($GroupFile[$groupName]) start $($svcs -join ' ')"
   # `start` only works on containers that already exist - first-ever run falls back to
   # `up -d` to actually create them.
   Invoke-Compose $groupName (@("start") + $svcs)
   if ($LASTEXITCODE -ne 0) { Invoke-Compose $groupName @("up", "-d") }
+  # Say it out loud, once, where it's actionable: a plain start leaves the
+  # profile-gated services (replicas, cluster nodes) untouched, so the group reads
+  # "up" without them and there's no other hint they exist.
+  $dormant = (Get-GroupState $groupName).Dormant
+  if ($dormant -gt 0) {
+    Write-Host "  (+$dormant service di balik profile - 'cpg start $groupName --all' kalo mau ikut nyala)" -ForegroundColor DarkGray
+  }
 }
 
 # Accepts zero, one, or many group names (e.g. `cpg start db ai messaging`). Zero ->
@@ -283,7 +372,8 @@ function Invoke-StartOne([string]$groupName) {
 # started independently; a bad name in the middle just gets skipped (with a message)
 # instead of aborting the rest of the batch.
 function Invoke-Start([string[]]$groupNames) {
-  $groupNames = @($groupNames | Where-Object { $_ })
+  $flags = Split-AllFlag $groupNames
+  $groupNames = $flags.Rest
   if ($groupNames.Count -eq 0) {
     $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "up" }
     if (-not $candidates) {
@@ -297,7 +387,7 @@ function Invoke-Start([string[]]$groupNames) {
   foreach ($g in $groupNames) {
     $resolved = Resolve-GroupOrDie $g
     if (-not $resolved) { continue }
-    Invoke-StartOne $resolved
+    Invoke-StartOne $resolved $flags.All
   }
 }
 
@@ -309,7 +399,10 @@ function Invoke-StopOne([string]$groupName) {
 }
 
 function Invoke-Stop([string[]]$groupNames) {
-  $groupNames = @($groupNames | Where-Object { $_ })
+  # `stop` needs no profile flags (compose stops profile-gated containers by name
+  # just fine), but accept and drop the token so `/stop db --all` isn't read as a
+  # group named "--all".
+  $groupNames = (Split-AllFlag $groupNames).Rest
   if ($groupNames.Count -eq 0) {
     $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "down" }
     if (-not $candidates) {
@@ -327,16 +420,24 @@ function Invoke-Stop([string[]]$groupNames) {
   }
 }
 
-function Invoke-RestartOne([string]$groupName) {
+function Invoke-RestartOne([string]$groupName, [bool]$All = $false) {
   Ensure-Dependencies $groupName
   $svcs = $SvcGroups[$groupName]
+  if ($All) {
+    # `restart` can't create anything, and with --all the profile-gated containers
+    # may not exist yet - so stop what's up and bring the whole group up instead.
+    Invoke-Compose $groupName (@("stop") + $svcs) *> $null
+    Invoke-StartOne $groupName $true
+    return
+  }
   Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
   Write-Host "docker compose -f $($GroupFile[$groupName]) restart $($svcs -join ' ')"
   Invoke-Compose $groupName (@("restart") + $svcs)
 }
 
 function Invoke-Restart([string[]]$groupNames) {
-  $groupNames = @($groupNames | Where-Object { $_ })
+  $flags = Split-AllFlag $groupNames
+  $groupNames = $flags.Rest
   if ($groupNames.Count -eq 0) {
     $picked = Select-FromMenu "Grup mana yang mau di-restart?" @($SvcGroups.Keys)
     if (-not $picked) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
@@ -345,7 +446,7 @@ function Invoke-Restart([string[]]$groupNames) {
   foreach ($g in $groupNames) {
     $resolved = Resolve-GroupOrDie $g
     if (-not $resolved) { continue }
-    Invoke-RestartOne $resolved
+    Invoke-RestartOne $resolved $flags.All
   }
 }
 
@@ -703,6 +804,16 @@ function Enter-Pane {
   Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H`r`n"
 }
 
+# Pushes the whole visible screen up into the scrollback: margins off (a full-screen
+# scroll is the only kind the emulator keeps), one newline per row, done. Used after a
+# shrink, where the old box rows get reflowed up into the scroll pane and would sit
+# there as leftover borders stacking under the new box - the emulator never says how
+# it reflowed, and nothing here mirrors the pane's content to repaint it. The output
+# isn't lost, it's one scroll up.
+function Clear-PaneToScrollback {
+  Write-Vt ("$($script:E)[r$($script:E)[$($script:PinnedRows);1H" + ("`r`n" * $script:PinnedRows))
+}
+
 # Repaints the 4 pinned rows and parks the cursor inside the box. Long input scrolls
 # horizontally (the window ends at the cursor) instead of wrapping - a wrapped line
 # would grow into the border row.
@@ -774,7 +885,13 @@ function Read-PinnedLine {
       $pc = $script:PinnedCols
       Update-TermSize
       if ($pr -ne $script:PinnedRows -or $pc -ne $script:PinnedCols) {
-        Write-Vt "$($script:E)[1;$($script:PinnedBottom)r"
+        # Only a shrink (or any width change, which re-wraps every line in the pane)
+        # leaves stale rows behind. Growing taller just hands us blank rows at the
+        # bottom, so the pane is still intact - repaint and keep the output on screen.
+        if ($script:PinnedRows -lt $pr -or $script:PinnedCols -ne $pc) {
+          Clear-PaneToScrollback
+        }
+        Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H"
         Show-PinnedPrompt $buf $pos
       }
     }
