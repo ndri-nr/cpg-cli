@@ -54,14 +54,17 @@ Run it bare to drop into an interactive shell - like `claude`'s own REPL:
 
 ```
 $ cpg
-╭────────────────────────────────────╮
-│ ✳ cpg · compose playground control │
-╰────────────────────────────────────╯
+╭─────────────────────────────────────╮
+│ ✳  cpg · compose playground control │
+╰─────────────────────────────────────╯
 /help buat commands · /exit buat keluar
 
-  ● database        9/9   postgres, postgres-replica-1, postgres-replica-2, pgpool, timescaledb, mongo-primary, mongo-replica-1, mongo-replica-2, mongo-express
-  ● cache           8/8   redis, redis-insight, redis-cluster-1, ...
-  ...
+  ● database        9/9   postgres, postgres-replica-1, +7 lainnya
+  ● cache           8/8   redis, redis-insight, +6 lainnya
+  ● messaging       1/1   rabbitmq
+  ● observability   4/4   otel-collector, tempo, +2 lainnya
+  ● quality         1/1   sonarqube
+  ● ai              1/1   chromadb
 
 ❯ /stop cache
 ▸ docker compose -f compose/cache.yml stop redis redis-insight ...
@@ -72,6 +75,10 @@ $ cpg
 ❯ /exit
 Bye.
 ```
+
+(the full member list per group still lives in `/detail <group>` - the status
+view only ever shows a couple of names + a count, on purpose, so it stays
+readable without a maximized terminal)
 
 Or run one-shot from a normal shell:
 

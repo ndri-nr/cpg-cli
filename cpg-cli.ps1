@@ -170,7 +170,15 @@ function Write-GroupLine($info) {
   Write-Host -NoNewline "  ● " -ForegroundColor $color
   Write-Host -NoNewline ("{0,-15}" -f $info.Group)
   Write-Host -NoNewline -ForegroundColor $color ("{0,2}/{1,-2}  " -f $info.Running, $info.Total)
-  Write-Host ($info.Services -join ", ") -ForegroundColor DarkGray
+  # Full member list lives in `/detail <group>` - showing all of them here made the
+  # line unreadably wide on anything but a maximized terminal. Just a taste + count.
+  if ($info.Services.Count -gt 2) {
+    $svcText = ($info.Services | Select-Object -First 2) -join ", "
+    $svcText += ", +$($info.Services.Count - 2) lainnya"
+  } else {
+    $svcText = $info.Services -join ", "
+  }
+  Write-Host $svcText -ForegroundColor DarkGray
 }
 
 function Show-Status([string]$filter) {

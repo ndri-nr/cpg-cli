@@ -207,7 +207,19 @@ print_status() {
     read -r running total <<<"$(group_counts "$group")"
     local state; state=$(group_state "$running" "$total")
     local color; color=$(state_color "$state")
-    local services="${SVC_GROUPS[$group]// /, }"
+    # Full member list lives in `/detail <group>` - showing all of them here made the
+    # line unreadably wide on anything but a maximized terminal. Just a taste + count.
+    # $IFS-based joins only ever use IFS's FIRST character as the separator (not the
+    # whole string), so `IFS=', '` silently drops the space - printf is the reliable
+    # way to join with a literal ", ".
+    local svc_arr=(${SVC_GROUPS[$group]}) services
+    if (( ${#svc_arr[@]} > 2 )); then
+      printf -v services '%s, ' "${svc_arr[@]:0:2}"
+      services="${services%, }, +$(( ${#svc_arr[@]} - 2 )) lainnya"
+    else
+      printf -v services '%s, ' "${svc_arr[@]}"
+      services="${services%, }"
+    fi
     printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
       "$color" "$C_RESET" "$group" \
       "$color" "$running" "$total" "$C_RESET" \
