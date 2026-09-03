@@ -82,10 +82,12 @@ The box really is pinned - against command output *and* against scrolling. The
 shell runs on the alternate screen with the terminal's own scroll region cut
 just above the box, so a long `docker compose` run scrolls in the pane above
 while the prompt stays put, and there's no terminal scrollback to slide the box
-out of view. Looking back through output is **Shift+↑ / Shift+↓** (works the
-same on macOS and Windows, no PageUp key needed); typing anything, or holding
-Shift+↓, returns to the newest line, and the hint line shows how far up you
-are. Resizing re-cuts and repaints live, re-fitting the status lines.
+out of view. Looking back through output is **Ctrl+B / Ctrl+F** (a screenful at a time, like
+`less`) - those always reach the app. Shift+↑/↓, Ctrl+↑/↓, Alt+↑/↓ and
+PageUp/PageDown scroll a few lines too where the terminal forwards them; some
+(Terminal.app included) bind Shift+arrows to their own scrolling and never send
+them on. Typing anything returns to the newest line, and the hint line shows how
+far up you are. Resizing re-cuts and repaints live, re-fitting the status lines.
 
 No mouse tracking is enabled, on purpose: that would take plain drags away from
 the terminal and break text selection. So select and copy work as they do

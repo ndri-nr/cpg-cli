@@ -375,9 +375,10 @@ Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
 Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
-Shift+↑ / Shift+↓ buat scroll area output - kotak input tetep di bawah, gak
-kegeser. Ngetik apa aja (atau Shift+↓ sampe bawah) = balik ke output terbaru.
-Select/copy teks jalan normal. CPG_ALTSCREEN=0 kalo mau balik ke layar biasa.
+Scroll area output: Ctrl+B (ke atas) / Ctrl+F (ke bawah) - selalu jalan. Shift+↑ /
+Shift+↓ juga dicoba, tapi sebagian terminal (Terminal.app) makan chord itu buat
+scroll-nya sendiri. Kotak input tetep di bawah, gak kegeser. Ngetik apa aja =
+balik ke output terbaru. Select/copy normal. CPG_ALTSCREEN=0 buat layar biasa.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -1067,7 +1068,7 @@ _cpg_render() {
   # separate printfs let the terminal paint half-finished states - visible as a
   # flicker on every keystroke, and as a stuttering box while dragging a resize.
   local hint="$_CPG_HINT"
-  (( _CPG_SCROLL > 0 )) && hint="↑ $_CPG_SCROLL baris ke atas · Shift+↓ atau ngetik buat balik"
+  (( _CPG_SCROLL > 0 )) && hint="↑ $_CPG_SCROLL baris ke atas · Ctrl+F / Shift+↓ / ngetik buat balik"
   printf -v out '\033[?25l\033[%d;1H\033[2K%s%s%s\033[%d;1H\033[2K%s╭%s╮%s\033[%d;1H\033[2K%s│%s %s❯%s %s\033[%d;%dH%s│%s\033[%d;1H\033[2K%s╰%s╯%s\033[%d;%dH\033[?25h' \
     $(( _CPG_ROWS - 3 )) "$C_DIM" "${hint:0:_CPG_COLS}" "$C_RESET" \
     $(( _CPG_ROWS - 2 )) "$C_DIM" "$bar" "$C_RESET" \
@@ -1143,6 +1144,12 @@ _cpg_read_line() {
           _CPG_BUF="${_CPG_BUF:0:_CPG_POS-1}${_CPG_BUF:_CPG_POS}"
           _CPG_POS=$(( _CPG_POS - 1 ))
         fi ;;
+      # Ctrl-B/Ctrl-F scroll the pane a screenful, like `less`. These exist because a
+      # terminal can swallow the arrow chords before they ever reach us - Terminal.app
+      # binds Shift-Up/Down to its own scrolling - while a plain control byte always
+      # arrives.
+      $'\002') _cpg_scroll_by "$(( _CPG_BOTTOM - 2 ))"; continue ;;  # Ctrl-B
+      $'\006') _cpg_scroll_by "-$(( _CPG_BOTTOM - 2 ))"; continue ;; # Ctrl-F
       $'\001') _CPG_POS=0 ;;                            # Ctrl-A
       $'\005') _CPG_POS=${#_CPG_BUF} ;;                 # Ctrl-E
       $'\013') _CPG_BUF="${_CPG_BUF:0:_CPG_POS}" ;;     # Ctrl-K
