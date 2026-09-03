@@ -1,0 +1,165 @@
+name: cpg-database
+
+services:
+  # Doubles as the replication master for postgres-replica-1/2 below - always on, no
+  # separate "master" container to start/stop. Replication is enabled via `command:` +
+  # a custom pg_hba.conf mounted outside PGDATA, so it doesn't touch the existing
+  # postgres_data volume's own files.
+  #
+  # NOTE: since postgres_data already has an initialized cluster, the repl_user role
+  # below does NOT get auto-created by an initdb script (those only run on a fresh/empty
+  # volume). Create it once manually after the first `docker compose up -d` with this
+  # config:
+  #   docker compose -f compose/database.yml exec postgres psql -U admin -d sample -c \
+  #     "CREATE ROLE repl_user WITH REPLICATION LOGIN PASSWORD 'repl_password';"
+  postgres:
+    image: postgres:18.2-alpine3.23
+    container_name: postgres
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: sample
+    command: >
+      postgres
+      -c wal_level=replica
+      -c max_wal_senders=10
+      -c max_replication_slots=10
+      -c hot_standby=on
+      -c hba_file=/etc/postgresql-custom/pg_hba.conf
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../postgres/pg_hba.conf:/etc/postgresql-custom/pg_hba.conf:ro
+    restart: unless-stopped
+
+  # Replicas (2x) - off by default, start only when needed:
+  #   docker compose -f compose/database.yml --profile postgres-replica up -d
+  # Each clones from `postgres` via pg_basebackup on first start (see replica-entrypoint.sh),
+  # then streams continuously. Data dirs are their own volumes - not shared with master.
+  postgres-replica-1:
+    image: postgres:18.2-alpine3.23
+    container_name: postgres-replica-1
+    profiles: ["postgres-replica"]
+    depends_on:
+      - postgres
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_MASTER_HOST: postgres
+      POSTGRES_REPLICATION_USER: repl_user
+      POSTGRES_REPLICATION_PASSWORD: repl_password
+    entrypoint: ["sh", "/scripts/replica-entrypoint.sh"]
+    volumes:
+      - postgres_replica_1_data:/var/lib/postgresql/data
+      - ../postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
+    ports:
+      - "5443:5432"
+    restart: unless-stopped
+
+  postgres-replica-2:
+    image: postgres:18.2-alpine3.23
+    container_name: postgres-replica-2
+    profiles: ["postgres-replica"]
+    depends_on:
+      - postgres
+    environment:
+      PGDATA: /var/lib/postgresql/data
+      POSTGRES_MASTER_HOST: postgres
+      POSTGRES_REPLICATION_USER: repl_user
+      POSTGRES_REPLICATION_PASSWORD: repl_password
+    entrypoint: ["sh", "/scripts/replica-entrypoint.sh"]
+    volumes:
+      - postgres_replica_2_data:/var/lib/postgresql/data
+      - ../postgres/replica-entrypoint.sh:/scripts/replica-entrypoint.sh:ro
+    ports:
+      - "5444:5432"
+    restart: unless-stopped
+
+  # Round-robin read routing across the 2 replicas (writes always go to `postgres`).
+  # Point your app at this port (5433), not directly at master/replica ports.
+  # NOTE: bitnami/pgpool:4 doesn't exist anymore - Bitnami moved older free-tier images to
+  # the unmaintained "bitnamilegacy" repo (no more security updates on these tags).
+  pgpool:
+    image: bitnamilegacy/pgpool:latest
+    container_name: pgpool
+    profiles: ["postgres-replica"]
+    depends_on:
+      - postgres
+      - postgres-replica-1
+      - postgres-replica-2
+    environment:
+      PGPOOL_BACKEND_NODES: "0:postgres:5432,1:postgres-replica-1:5432,2:postgres-replica-2:5432"
+      PGPOOL_SR_CHECK_USER: repl_user
+      PGPOOL_SR_CHECK_PASSWORD: repl_password
+      PGPOOL_ENABLE_LOAD_BALANCING: "yes"
+      PGPOOL_POSTGRES_USERNAME: admin
+      PGPOOL_POSTGRES_PASSWORD: password
+      PGPOOL_ADMIN_USERNAME: admin
+      PGPOOL_ADMIN_PASSWORD: password
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: timescaledb
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: sample
+      PGDATA: /data/timescaledb
+    ports:
+      - "6543:5432"
+    volumes:
+      - timescaledb-data:/data/timescaledb
+    restart: unless-stopped
+
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    environment:
+      MONGO_INITDB_DATABASE: sample
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    restart: unless-stopped
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo-express
+    depends_on:
+      - mongodb
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_ADMINUSERNAME: admin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: password
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin
+    ports:
+      - "8888:8081"
+    restart: unless-stopped
+
+# Named "cpg-database" (not the project-default auto name) so compose/ai.yml can attach
+# chromadb to it as an `external: true` network - see compose/ai.yml for why.
+networks:
+  default:
+    name: cpg-database
+
+# Pinned to explicit "cpg_*" names (rather than the "cpg-database_*" Compose would
+# auto-generate from the project name) so volume names stay stable and predictable
+# regardless of which group/project owns them.
+volumes:
+  postgres_data:
+    name: cpg_postgres_data
+  postgres_replica_1_data:
+    name: cpg_postgres_replica_1_data
+  postgres_replica_2_data:
+    name: cpg_postgres_replica_2_data
+  timescaledb-data:
+    name: cpg_timescaledb-data
+  mongodb_data:
+    name: cpg_mongodb_data

@@ -1,0 +1,7 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local env overrides, if anyone adds one later
+.env
+.env.local

@@ -1,0 +1,23 @@
+name: cpg-messaging
+
+services:
+  rabbitmq:
+    image: rabbitmq:4.1-management
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: password
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    restart: unless-stopped
+
+networks:
+  default:
+    name: cpg-messaging
+
+volumes:
+  rabbitmq_data:
+    name: cpg_rabbitmq_data

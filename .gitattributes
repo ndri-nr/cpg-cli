@@ -1,0 +1,11 @@
+# Keep shell scripts LF even when checked out on Windows - CRLF breaks the shebang
+# line and bash's own parsing (`$'\r': command not found`).
+*.sh text eol=lf
+
+# PowerShell scripts stay CRLF (their native convention, avoids noisy diffs for
+# Windows contributors editing in default line-ending mode).
+*.ps1 text eol=crlf
+
+*.yml text eol=lf
+*.yaml text eol=lf
+*.conf text eol=lf

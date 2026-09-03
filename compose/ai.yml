@@ -1,0 +1,35 @@
+name: cpg-ai
+
+services:
+  # No healthcheck: current chromadb/chroma:latest is a bare static Rust binary + dash -
+  # no curl/wget/python/nc inside, and dash has no /dev/tcp, so no HTTP/TCP check is
+  # possible without adding a sidecar. Was showing "unhealthy" purely because `curl` was
+  # missing (exit 127), not because the endpoint was wrong or the service was down -
+  # nothing else depends_on chromadb's health, so dropping it is a no-op.
+  #
+  # Cross-project service: needs both `postgres` (cpg-database project) and `redis`
+  # (cpg-cache project), so it attaches to their networks directly instead of getting
+  # its own. Cross-project `depends_on` isn't a thing in Compose, so there's no
+  # automatic start ordering here - `cpg start ai` handles that (auto-starts database
+  # and cache first if their networks don't exist yet). Starting this file directly
+  # with plain `docker compose -f compose/ai.yml up -d` will fail with "network cpg-database
+  # not found" unless those two are already up.
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    networks: [cpg-database, cpg-cache]
+    ports:
+      - "8100:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    restart: unless-stopped
+
+networks:
+  cpg-database:
+    external: true
+  cpg-cache:
+    external: true
+
+volumes:
+  chroma_data:
+    name: cpg_chroma_data
