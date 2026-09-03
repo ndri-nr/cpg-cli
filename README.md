@@ -78,12 +78,13 @@ Or run one-shot from a normal shell:
 ```
 cpg status             # every group + running/total count, color-coded
 cpg status cache       # just one group
-cpg start [group]      # no group -> pick from what's not fully up yet
-cpg stop  [group]      # no group -> pick from what's actually running
-cpg restart [group]
+cpg start [group...]   # no group -> pick from what's not fully up yet; takes several: `cpg start db ai messaging`
+cpg stop  [group...]   # no group -> pick from what's actually running; same multi-group support
+cpg restart [group...]
 cpg detail [group]     # connection info per service: host/port/user/pass/URI
 cpg update             # git pull cpg-cli itself + refresh the cpg wrapper
 cpg uninstall          # remove the cpg command (repo/containers/data untouched)
+cpg clear              # clear the terminal (in the shell: redraws the banner+status too)
 cpg help
 ```
 
@@ -91,10 +92,17 @@ Forgiving input everywhere (shell or one-shot): case-insensitive, understands
 aliases (`db`, `redis`, `rabbit`, `obs`, `sonar`, `chroma`, `up`/`down`, ...),
 unique prefixes (`obs` -> `observability`), and asks "did you mean X?" on a
 close typo. Even a typo too far off to auto-confirm still gets a ranked
-"mirip² gini: ..." recommendation instead of a flat "not found". In the
-`cpg-cli.sh` REPL specifically, Tab also autocompletes `/command` names and
-group names live as you type (readline hook - not ported to `cpg-cli.ps1`,
-whose `Read-Host` prompt has no completion hook to attach to).
+"mirip² gini: ..." recommendation instead of a flat "not found". A bad name
+in a multi-group batch (`/start db xyz ai`) just gets skipped with a message
+- the rest of the batch still runs. In the `cpg-cli.sh` REPL specifically,
+Tab also autocompletes `/command` names and group names live as you type
+(readline hook - not ported to `cpg-cli.ps1`, whose `Read-Host` prompt has
+no completion hook to attach to).
+
+The interactive shell also auto-*checks* for a newer cpg-cli release on
+startup (a background `git fetch`, at most once every 24h - never blocks,
+never applies anything by itself) and prints a one-line nudge to run
+`/update` if it's behind. It never updates anything without you asking.
 
 If you didn't install it globally, run it straight from the repo instead:
 `./cpg-cli.sh ...` or `./cpg-cli.ps1 ...`.

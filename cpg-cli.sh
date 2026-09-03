@@ -11,9 +11,9 @@
 #   ./cpg-cli.sh                 interactive menu (asks start or stop, then group)
 #   ./cpg-cli.sh status          show every group + running/total count
 #   ./cpg-cli.sh status [group]  show just that group's status
-#   ./cpg-cli.sh start [group]   start a group (no group = pick from what's not fully up)
-#   ./cpg-cli.sh stop  [group]   stop a group  (no group = pick from what's running)
-#   ./cpg-cli.sh restart [group]
+#   ./cpg-cli.sh start [group...]   start 1+ groups (no group = pick from what's not fully up)
+#   ./cpg-cli.sh stop  [group...]   stop 1+ groups  (no group = pick from what's running)
+#   ./cpg-cli.sh restart [group...]
 #   ./cpg-cli.sh detail [group]  connection info (host/port/user/pass/URI) per service
 #   ./cpg-cli.sh help
 set -euo pipefail
@@ -250,6 +250,7 @@ Usage:
   $0 detail [grup]      connection info (host/port/user/pass/URI) per service
   $0 update             git pull cpg-cli itself + refresh the cpg wrapper
   $0 uninstall          remove the cpg command (repo/containers/data untouched)
+  $0 clear              clear the terminal (in the shell: also redraws the banner+status)
 
 Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
@@ -277,25 +278,8 @@ ensure_dependencies() {
 
 # Every early-out below uses `return`, never `exit` - these run inside the REPL loop
 # too, where `exit` would kill the whole shell instead of just aborting one command.
-do_start() {
-  local group="${1:-}"
-  if [[ -n "$group" ]]; then
-    if ! group=$(resolve_group_or_die "$group"); then return 1; fi
-  fi
-
-  if [[ -z "$group" ]]; then
-    local candidates=()
-    for g in "${GROUP_ORDER[@]}"; do
-      read -r running total <<<"$(group_counts "$g")"
-      [[ "$(group_state "$running" "$total")" != "up" ]] && candidates+=("$g")
-    done
-    if [[ ${#candidates[@]} -eq 0 ]]; then
-      echo "${C_GREEN}✓${C_RESET} Semua grup udah nyala semua."
-      return 0
-    fi
-    if ! group=$(menu "Grup mana yang mau di-start?" "${candidates[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
-  fi
-
+_start_one() {
+  local group="$1"
   ensure_dependencies "$group"
   echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} start ${SVC_GROUPS[$group]}"
   # `start` only works on containers that already exist - first-ever run falls back to
@@ -306,13 +290,45 @@ do_start() {
   fi
 }
 
-do_stop() {
-  local group="${1:-}"
-  if [[ -n "$group" ]]; then
-    if ! group=$(resolve_group_or_die "$group"); then return 1; fi
+# Accepts zero, one, or many group names (e.g. `/start db ai messaging`). Zero ->
+# pick-from-menu (single choice, as before). One or more -> each is resolved and
+# started independently; a bad name in the middle just gets skipped (with a message)
+# instead of aborting the rest of the batch.
+do_start() {
+  local groups=("$@")
+  if [[ ${#groups[@]} -eq 0 ]]; then
+    local candidates=()
+    for g in "${GROUP_ORDER[@]}"; do
+      read -r running total <<<"$(group_counts "$g")"
+      [[ "$(group_state "$running" "$total")" != "up" ]] && candidates+=("$g")
+    done
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+      echo "${C_GREEN}✓${C_RESET} Semua grup udah nyala semua."
+      return 0
+    fi
+    local picked
+    if ! picked=$(menu "Grup mana yang mau di-start?" "${candidates[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
+    groups=("$picked")
   fi
 
-  if [[ -z "$group" ]]; then
+  local g resolved rc=0
+  for g in "${groups[@]}"; do
+    if ! resolved=$(resolve_group_or_die "$g"); then rc=1; continue; fi
+    _start_one "$resolved"
+  done
+  return "$rc"
+}
+
+_stop_one() {
+  local group="$1"
+  echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} stop ${SVC_GROUPS[$group]}"
+  # shellcheck disable=SC2086
+  dc "$group" stop ${SVC_GROUPS[$group]}
+}
+
+do_stop() {
+  local groups=("$@")
+  if [[ ${#groups[@]} -eq 0 ]]; then
     local candidates=()
     for g in "${GROUP_ORDER[@]}"; do
       read -r running total <<<"$(group_counts "$g")"
@@ -322,26 +338,41 @@ do_stop() {
       echo "${C_YELLOW}!${C_RESET} Emang lagi gak ada yang jalan."
       return 0
     fi
-    if ! group=$(menu "Grup mana yang mau di-stop?" "${candidates[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
+    local picked
+    if ! picked=$(menu "Grup mana yang mau di-stop?" "${candidates[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
+    groups=("$picked")
   fi
 
-  echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} stop ${SVC_GROUPS[$group]}"
-  # shellcheck disable=SC2086
-  dc "$group" stop ${SVC_GROUPS[$group]}
+  local g resolved rc=0
+  for g in "${groups[@]}"; do
+    if ! resolved=$(resolve_group_or_die "$g"); then rc=1; continue; fi
+    _stop_one "$resolved"
+  done
+  return "$rc"
 }
 
-do_restart() {
-  local group="${1:-}"
-  if [[ -n "$group" ]]; then
-    if ! group=$(resolve_group_or_die "$group"); then return 1; fi
-  fi
-  if [[ -z "$group" ]]; then
-    if ! group=$(menu "Grup mana yang mau di-restart?" "${GROUP_ORDER[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
-  fi
+_restart_one() {
+  local group="$1"
   ensure_dependencies "$group"
   echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} restart ${SVC_GROUPS[$group]}"
   # shellcheck disable=SC2086
   dc "$group" restart ${SVC_GROUPS[$group]}
+}
+
+do_restart() {
+  local groups=("$@")
+  if [[ ${#groups[@]} -eq 0 ]]; then
+    local picked
+    if ! picked=$(menu "Grup mana yang mau di-restart?" "${GROUP_ORDER[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
+    groups=("$picked")
+  fi
+
+  local g resolved rc=0
+  for g in "${groups[@]}"; do
+    if ! resolved=$(resolve_group_or_die "$g"); then rc=1; continue; fi
+    _restart_one "$resolved"
+  done
+  return "$rc"
 }
 
 # Connection info per service - host/port/user/pass/URI, whatever you'd need to
@@ -542,14 +573,49 @@ _cpg_tab_complete() {
   fi
 }
 
-repl() {
-  echo "${C_ACCENT}╭────────────────────────────────────╮${C_RESET}"
-  echo "${C_ACCENT}│${C_RESET} ${C_ACCENT}✳${C_RESET} ${C_BOLD}cpg${C_RESET} · compose playground control ${C_ACCENT}│${C_RESET}"
-  echo "${C_ACCENT}╰────────────────────────────────────╯${C_RESET}"
+print_banner() {
+  echo "${C_ACCENT}╭─────────────────────────────────────╮${C_RESET}"
+  echo "${C_ACCENT}│${C_RESET} ${C_ACCENT}✳${C_RESET}  ${C_BOLD}cpg${C_RESET} · compose playground control ${C_ACCENT}│${C_RESET}"
+  echo "${C_ACCENT}╰─────────────────────────────────────╯${C_RESET}"
   echo "${C_DIM}/help buat commands · /exit buat keluar${C_RESET}"
+}
+
+# Auto-CHECK for updates (never auto-applies anything - still requires `/update`).
+# Zero added latency: only compares against whatever origin/main ref is already
+# cached locally (no network call on the hot path). A real `git fetch` only fires in
+# the background, at most once every 24h, so the cached ref catches up over time
+# without ever blocking a command.
+check_for_update() {
+  local git_dir cache_file last_check now
+  git_dir=$(git rev-parse --git-dir 2>/dev/null) || return 0
+  cache_file="$git_dir/cpg-last-update-check"
+  now=$(date +%s)
+  last_check=0
+  [[ -f "$cache_file" ]] && last_check=$(cat "$cache_file" 2>/dev/null) 2>/dev/null
+  [[ "$last_check" =~ ^[0-9]+$ ]] || last_check=0
+
+  if (( now - last_check > 86400 )); then
+    echo "$now" > "$cache_file" 2>/dev/null
+    ( git fetch --quiet origin main >/dev/null 2>&1 & disown ) 2>/dev/null
+  fi
+
+  local behind
+  behind=$(git rev-list --count HEAD..origin/main 2>/dev/null) || return 0
+  if [[ "$behind" =~ ^[0-9]+$ ]] && (( behind > 0 )); then
+    echo "${C_YELLOW}↑${C_RESET} Update tersedia ($behind commit baru) - ketik ${C_BOLD}/update${C_RESET}"
+  fi
+}
+
+repl() {
+  print_banner
+  check_for_update
   echo
   print_status
   history -c
+  # `bind` refuses ("line editing not enabled") unless emacs/vi line-editing mode is
+  # on - off by default in a non-interactive script (which this is, even run via the
+  # `cpg` wrapper) regardless of `read -e` working fine on its own.
+  set -o emacs
   bind -x '"\t": _cpg_tab_complete' 2>/dev/null || true
   while true; do
     echo
@@ -565,10 +631,15 @@ repl() {
     line="${line#/}"
     [[ -z "$line" ]] && continue
     read -r sub_cmd sub_arg <<<"$line"
+    # sub_args: word-split so start/stop/restart can take multiple groups at once
+    # (e.g. `/start db ai messaging`); status/detail just use the first word.
+    local sub_args=()
+    read -ra sub_args <<<"$sub_arg"
 
     case "$sub_cmd" in
       exit|quit|q) break ;;
       -h|--help|help) show_help; continue ;;
+      clear|cls) clear; print_banner; echo; print_status; continue ;;
     esac
 
     if ! resolved_cmd=$(resolve_choice "$sub_cmd" CMD_ALIAS "${CMDS[@]}"); then
@@ -577,11 +648,11 @@ repl() {
     fi
 
     case "$resolved_cmd" in
-      status) print_status "$sub_arg" || true ;;
-      start) do_start "$sub_arg" || true ;;
-      stop) do_stop "$sub_arg" || true ;;
-      restart) do_restart "$sub_arg" || true ;;
-      detail) show_detail "$sub_arg" || true ;;
+      status) print_status "${sub_args[0]:-}" || true ;;
+      start) do_start "${sub_args[@]}" || true ;;
+      stop) do_stop "${sub_args[@]}" || true ;;
+      restart) do_restart "${sub_args[@]}" || true ;;
+      detail) show_detail "${sub_args[0]:-}" || true ;;
       update) do_update || true ;;
       uninstall) do_uninstall || true ;;
     esac
@@ -593,9 +664,11 @@ repl() {
 
 cmd="${1:-}"
 arg="${2:-}"
+args=("${@:2}") # everything after the command - start/stop/restart can take several
 
 case "$cmd" in
   -h|--help|help) show_help; exit 0 ;;
+  clear|cls) clear; exit 0 ;;
 esac
 
 if [[ -n "$cmd" ]]; then
@@ -613,9 +686,9 @@ fi
 
 case "$cmd" in
   status) print_status "$arg" ;;
-  start) do_start "$arg" ;;
-  stop) do_stop "$arg" ;;
-  restart) do_restart "$arg" ;;
+  start) do_start "${args[@]}" ;;
+  stop) do_stop "${args[@]}" ;;
+  restart) do_restart "${args[@]}" ;;
   detail) show_detail "$arg" ;;
   update) do_update ;;
   uninstall) do_uninstall ;;

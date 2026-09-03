@@ -14,17 +14,20 @@
   ./cpg-cli.ps1 status cache     show just that group's status
   ./cpg-cli.ps1 start            pick from groups that aren't fully up
   ./cpg-cli.ps1 start db         start a specific group (alias for database)
+  ./cpg-cli.ps1 start db ai messaging   start several groups at once
   ./cpg-cli.ps1 stop             pick from groups that have something running
   ./cpg-cli.ps1 stop rabbit
-  ./cpg-cli.ps1 restart [group]
+  ./cpg-cli.ps1 restart [group...]
   ./cpg-cli.ps1 help
 #>
 param(
   [Parameter(Position = 0)]
   [string]$Command = "",
 
-  [Parameter(Position = 1)]
-  [string]$Group = ""
+  # start/stop/restart accept several group names at once (e.g. `cpg start db ai
+  # messaging`) - status/detail only ever look at $Group[0].
+  [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+  [string[]]$Group = @()
 )
 
 Set-Location $PSScriptRoot
@@ -209,6 +212,7 @@ Usage:
   ./cpg-cli.ps1 detail [grup]      connection info (host/port/user/pass/URI) per service
   ./cpg-cli.ps1 update             git pull cpg-cli itself + refresh the cpg wrapper
   ./cpg-cli.ps1 uninstall          remove the cpg command (repo/containers/data untouched)
+  ./cpg-cli.ps1 clear              clear the terminal (in the shell: also redraws the banner+status)
 
 Grup: $($SvcGroups.Keys -join ', ')
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
@@ -232,22 +236,7 @@ function Ensure-Dependencies([string]$groupName) {
   }
 }
 
-# These `return` on every early-out, never `exit` - they run inside the REPL loop too,
-# where `exit` would kill the whole shell instead of just aborting one command.
-function Invoke-Start([string]$groupName) {
-  if ($groupName) {
-    $groupName = Resolve-GroupOrDie $groupName
-    if (-not $groupName) { return }
-  }
-  if (-not $groupName) {
-    $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "up" }
-    if (-not $candidates) {
-      Write-Host "✓ Semua grup udah nyala semua." -ForegroundColor Green
-      return
-    }
-    $groupName = Select-FromMenu "Grup mana yang mau di-start?" @($candidates)
-    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
-  }
+function Invoke-StartOne([string]$groupName) {
   Ensure-Dependencies $groupName
   $svcs = $SvcGroups[$groupName]
   Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
@@ -258,40 +247,75 @@ function Invoke-Start([string]$groupName) {
   if ($LASTEXITCODE -ne 0) { Invoke-Compose $groupName @("up", "-d") }
 }
 
-function Invoke-Stop([string]$groupName) {
-  if ($groupName) {
-    $groupName = Resolve-GroupOrDie $groupName
-    if (-not $groupName) { return }
-  }
-  if (-not $groupName) {
-    $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "down" }
+# Accepts zero, one, or many group names (e.g. `cpg start db ai messaging`). Zero ->
+# pick-from-menu (single choice, as before). One or more -> each is resolved and
+# started independently; a bad name in the middle just gets skipped (with a message)
+# instead of aborting the rest of the batch.
+function Invoke-Start([string[]]$groupNames) {
+  $groupNames = @($groupNames | Where-Object { $_ })
+  if ($groupNames.Count -eq 0) {
+    $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "up" }
     if (-not $candidates) {
-      Write-Host "! Emang lagi gak ada yang jalan." -ForegroundColor Yellow
+      Write-Host "✓ Semua grup udah nyala semua." -ForegroundColor Green
       return
     }
-    $groupName = Select-FromMenu "Grup mana yang mau di-stop?" @($candidates)
-    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
+    $picked = Select-FromMenu "Grup mana yang mau di-start?" @($candidates)
+    if (-not $picked) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
+    $groupNames = @($picked)
   }
+  foreach ($g in $groupNames) {
+    $resolved = Resolve-GroupOrDie $g
+    if (-not $resolved) { continue }
+    Invoke-StartOne $resolved
+  }
+}
+
+function Invoke-StopOne([string]$groupName) {
   $svcs = $SvcGroups[$groupName]
   Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
   Write-Host "docker compose -f $($GroupFile[$groupName]) stop $($svcs -join ' ')"
   Invoke-Compose $groupName (@("stop") + $svcs)
 }
 
-function Invoke-Restart([string]$groupName) {
-  if ($groupName) {
-    $groupName = Resolve-GroupOrDie $groupName
-    if (-not $groupName) { return }
+function Invoke-Stop([string[]]$groupNames) {
+  $groupNames = @($groupNames | Where-Object { $_ })
+  if ($groupNames.Count -eq 0) {
+    $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "down" }
+    if (-not $candidates) {
+      Write-Host "! Emang lagi gak ada yang jalan." -ForegroundColor Yellow
+      return
+    }
+    $picked = Select-FromMenu "Grup mana yang mau di-stop?" @($candidates)
+    if (-not $picked) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
+    $groupNames = @($picked)
   }
-  if (-not $groupName) {
-    $groupName = Select-FromMenu "Grup mana yang mau di-restart?" @($SvcGroups.Keys)
-    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
+  foreach ($g in $groupNames) {
+    $resolved = Resolve-GroupOrDie $g
+    if (-not $resolved) { continue }
+    Invoke-StopOne $resolved
   }
+}
+
+function Invoke-RestartOne([string]$groupName) {
   Ensure-Dependencies $groupName
   $svcs = $SvcGroups[$groupName]
   Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
   Write-Host "docker compose -f $($GroupFile[$groupName]) restart $($svcs -join ' ')"
   Invoke-Compose $groupName (@("restart") + $svcs)
+}
+
+function Invoke-Restart([string[]]$groupNames) {
+  $groupNames = @($groupNames | Where-Object { $_ })
+  if ($groupNames.Count -eq 0) {
+    $picked = Select-FromMenu "Grup mana yang mau di-restart?" @($SvcGroups.Keys)
+    if (-not $picked) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
+    $groupNames = @($picked)
+  }
+  foreach ($g in $groupNames) {
+    $resolved = Resolve-GroupOrDie $g
+    if (-not $resolved) { continue }
+    Invoke-RestartOne $resolved
+  }
 }
 
 # Connection info per service - host/port/user/pass/URI, whatever you'd need to
@@ -467,14 +491,46 @@ function Invoke-Uninstall {
 
 # --- REPL (bare cpg, no args) ---------------------------------------------
 
-function Start-Repl {
-  Write-Host "╭────────────────────────────────────╮" -ForegroundColor DarkYellow
+function Show-Banner {
+  Write-Host "╭─────────────────────────────────────╮" -ForegroundColor DarkYellow
   Write-Host -NoNewline "│ " -ForegroundColor DarkYellow
-  Write-Host -NoNewline "✳ " -ForegroundColor DarkYellow
+  Write-Host -NoNewline "✳  " -ForegroundColor DarkYellow
   Write-Host -NoNewline "cpg · compose playground control "
   Write-Host "│" -ForegroundColor DarkYellow
-  Write-Host "╰────────────────────────────────────╯" -ForegroundColor DarkYellow
+  Write-Host "╰─────────────────────────────────────╯" -ForegroundColor DarkYellow
   Write-Host "/help buat commands · /exit buat keluar" -ForegroundColor DarkGray
+}
+
+# Auto-CHECK for updates (never auto-applies anything - still requires `/update`).
+# Zero added latency: only compares against whatever origin/main ref is already
+# cached locally (no network call on the hot path). A real `git fetch` only fires in
+# the background, at most once every 24h, so the cached ref catches up over time
+# without ever blocking a command.
+function Test-ForUpdate {
+  $gitDir = git rev-parse --git-dir 2>$null
+  if (-not $gitDir -or $LASTEXITCODE -ne 0) { return }
+  $cacheFile = Join-Path $gitDir "cpg-last-update-check"
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $lastCheck = 0
+  if (Test-Path $cacheFile) {
+    $raw = Get-Content $cacheFile -Raw -ErrorAction SilentlyContinue
+    if ($raw -match '^\d+$') { $lastCheck = [long]$raw }
+  }
+
+  if (($now - $lastCheck) -gt 86400) {
+    Set-Content -Path $cacheFile -Value $now -NoNewline
+    Start-Process -FilePath "git" -ArgumentList "fetch", "--quiet", "origin", "main" -WindowStyle Hidden
+  }
+
+  $behind = git rev-list --count HEAD..origin/main 2>$null
+  if ($LASTEXITCODE -eq 0 -and $behind -match '^\d+$' -and [int]$behind -gt 0) {
+    Write-Host "↑ Update tersedia ($behind commit baru) - ketik /update" -ForegroundColor Yellow
+  }
+}
+
+function Start-Repl {
+  Show-Banner
+  Test-ForUpdate
   Write-Host ""
   Show-Status ""
   while ($true) {
@@ -487,9 +543,18 @@ function Start-Repl {
     $parts = $line -split '\s+', 2
     $subCmd = $parts[0]
     $subArg = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+    # start/stop/restart can take several groups at once (e.g. `/start db ai messaging`).
+    $subArgs = @($subArg -split '\s+' | Where-Object { $_ })
 
     if ($subCmd -in @("exit", "quit", "q")) { break }
     if ($subCmd -in @("-h", "--help", "help")) { Show-Help; continue }
+    if ($subCmd -in @("clear", "cls")) {
+      Clear-Host
+      Show-Banner
+      Write-Host ""
+      Show-Status ""
+      continue
+    }
 
     $resolved = Resolve-Choice $subCmd $CmdAlias $Cmds
     if (-not $resolved) {
@@ -498,9 +563,9 @@ function Start-Repl {
     }
     switch ($resolved) {
       "status" { Show-Status $subArg }
-      "start" { Invoke-Start $subArg }
-      "stop" { Invoke-Stop $subArg }
-      "restart" { Invoke-Restart $subArg }
+      "start" { Invoke-Start $subArgs }
+      "stop" { Invoke-Stop $subArgs }
+      "restart" { Invoke-Restart $subArgs }
       "detail" { Show-Detail $subArg }
       "update" { Invoke-Update }
       "uninstall" { Invoke-Uninstall }
@@ -515,6 +580,10 @@ if ($Command -in @("-h", "--help", "help")) {
   Show-Help
   exit 0
 }
+if ($Command -in @("clear", "cls")) {
+  Clear-Host
+  exit 0
+}
 
 if ($Command -and $Command -notin $Cmds) {
   $resolvedCmd = Resolve-Choice $Command $CmdAlias $Cmds
@@ -526,11 +595,11 @@ if ($Command -and $Command -notin $Cmds) {
 }
 
 switch ($Command) {
-  "status" { Show-Status $Group }
+  "status" { Show-Status $Group[0] }
   "start" { Invoke-Start $Group }
   "stop" { Invoke-Stop $Group }
   "restart" { Invoke-Restart $Group }
-  "detail" { Show-Detail $Group }
+  "detail" { Show-Detail $Group[0] }
   "update" { Invoke-Update }
   "uninstall" { Invoke-Uninstall }
   "" { Start-Repl }
