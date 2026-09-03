@@ -91,7 +91,10 @@ Forgiving input everywhere (shell or one-shot): case-insensitive, understands
 aliases (`db`, `redis`, `rabbit`, `obs`, `sonar`, `chroma`, `up`/`down`, ...),
 unique prefixes (`obs` -> `observability`), and asks "did you mean X?" on a
 close typo. Even a typo too far off to auto-confirm still gets a ranked
-"mirip² gini: ..." recommendation instead of a flat "not found".
+"mirip² gini: ..." recommendation instead of a flat "not found". In the
+`cpg-cli.sh` REPL specifically, Tab also autocompletes `/command` names and
+group names live as you type (readline hook - not ported to `cpg-cli.ps1`,
+whose `Read-Host` prompt has no completion hook to attach to).
 
 If you didn't install it globally, run it straight from the repo instead:
 `./cpg-cli.sh ...` or `./cpg-cli.ps1 ...`.

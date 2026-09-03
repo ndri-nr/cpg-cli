@@ -254,6 +254,7 @@ Usage:
 Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
+Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -509,6 +510,38 @@ do_uninstall() {
 
 # --- REPL (bare `cpg`, no args) --------------------------------------------
 
+# Tab-completion for the REPL prompt, hooked into readline via `bind -x` (bash 4+ -
+# READLINE_LINE/READLINE_POINT let a bound function read/rewrite the current line in
+# place). Completes /command names, then group names once a command word is typed.
+# NOTE: only ever verified by scripted (non-tty) tests here - genuinely press Tab in
+# a real terminal to confirm the feel; `bind -x` + READLINE_LINE is standard bash but
+# untested by us against a live keyboard.
+_cpg_tab_complete() {
+  local line="$READLINE_LINE" point="$READLINE_POINT"
+  local prefix="${line:0:point}"
+  local matches=() c
+
+  if [[ "$prefix" =~ ^/([a-zA-Z_-]*)$ ]]; then
+    local word="${BASH_REMATCH[1]}"
+    for c in "${CMDS[@]}"; do [[ "$c" == "$word"* ]] && matches+=("$c"); done
+    if [[ ${#matches[@]} -eq 1 ]]; then
+      READLINE_LINE="/${matches[0]} "
+      READLINE_POINT=${#READLINE_LINE}
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+      printf "\n  %s\n" "${matches[*]}"
+    fi
+  elif [[ "$prefix" =~ ^/([a-zA-Z_-]+)\ ([a-zA-Z_-]*)$ ]]; then
+    local word="${BASH_REMATCH[2]}"
+    for c in "${GROUP_ORDER[@]}"; do [[ "$c" == "$word"* ]] && matches+=("$c"); done
+    if [[ ${#matches[@]} -eq 1 ]]; then
+      READLINE_LINE="${line:0:point-${#word}}${matches[0]}"
+      READLINE_POINT=${#READLINE_LINE}
+    elif [[ ${#matches[@]} -gt 1 ]]; then
+      printf "\n  %s\n" "${matches[*]}"
+    fi
+  fi
+}
+
 repl() {
   echo "${C_ACCENT}╭────────────────────────────────────╮${C_RESET}"
   echo "${C_ACCENT}│${C_RESET} ${C_ACCENT}✳${C_RESET} ${C_BOLD}cpg${C_RESET} · compose playground control ${C_ACCENT}│${C_RESET}"
@@ -517,6 +550,7 @@ repl() {
   echo
   print_status
   history -c
+  bind -x '"\t": _cpg_tab_complete' 2>/dev/null || true
   while true; do
     echo
     # `-e` turns on readline for this read - without it, arrow keys just dump raw
