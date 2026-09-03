@@ -784,7 +784,12 @@ print_banner() {
   echo "${C_ACCENT}╭─────────────────────────────────────╮${C_RESET}"
   echo "${C_ACCENT}│${C_RESET} ${C_ACCENT}✳${C_RESET}  ${C_BOLD}cpg${C_RESET} · compose playground control ${C_ACCENT}│${C_RESET}"
   echo "${C_ACCENT}╰─────────────────────────────────────╯${C_RESET}"
-  echo "${C_DIM}/help buat commands · /exit buat keluar${C_RESET}"
+  # Short commit in the banner: a running cpg keeps the OLD code in memory, so after
+  # a `git pull` the only way to tell what you're actually looking at is a version
+  # marker (asked "is this the new build?" one time too many).
+  local ver=""
+  ver=$(git rev-parse --short HEAD 2>/dev/null) || ver=""
+  echo "${C_DIM}/help buat commands · /exit buat keluar${ver:+ · $ver}${C_RESET}"
 }
 
 # Auto-CHECK for updates (never auto-applies anything - still requires `/update`).

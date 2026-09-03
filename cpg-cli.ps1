@@ -699,7 +699,12 @@ function Show-Banner {
   Write-Host -NoNewline "cpg · compose playground control "
   Write-Host "│" -ForegroundColor DarkYellow
   Write-Host "╰─────────────────────────────────────╯" -ForegroundColor DarkYellow
-  Write-Host "/help buat commands · /exit buat keluar" -ForegroundColor DarkGray
+  # Short commit in the banner: a running cpg keeps the OLD code in memory, so after
+  # a `git pull` the only way to tell what you're actually looking at is a version
+  # marker.
+  $ver = git rev-parse --short HEAD 2>$null
+  $suffix = if ($LASTEXITCODE -eq 0 -and $ver) { " · $($ver.Trim())" } else { "" }
+  Write-Host "/help buat commands · /exit buat keluar$suffix" -ForegroundColor DarkGray
 }
 
 # Auto-CHECK for updates (never auto-applies anything - still requires `/update`).
