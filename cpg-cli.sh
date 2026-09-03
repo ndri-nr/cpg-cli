@@ -375,9 +375,10 @@ Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
 Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
-Scroll (wheel / PgUp-PgDn) geser area output doang - kotak input tetep di bawah.
-End atau langsung ngetik = balik ke output terbaru. CPG_ALTSCREEN=0 kalo mau
-balik ke layar normal (scroll-nya jadi geser window kayak biasa).
+Scroll (wheel / PgUp-PgDn) geser area output doang - kotak input tetep di bawah,
+dan gak bisa kelewat keluar dari layar cpg. End atau langsung ngetik = balik ke
+output terbaru. Select teks pakai Option-drag (mouse-nya dipegang cpg); CPG_MOUSE=0
+buat balikin wheel + drag ke terminal.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -714,7 +715,7 @@ do_update() {
     # `exec` never runs the EXIT trap, so the scroll region has to be released by
     # hand here or the replacement process inherits a half-scrolling terminal.
     _cpg_region_off
-    _cpg_alt_off
+    _cpg_mouse_off
     exec bash "$0"
   fi
 }
@@ -853,7 +854,7 @@ _CPG_HIST=(); _CPG_CL=""; _CPG_CP=0; _CPG_CMATCH=()
 _CPG_WINCH=0
 _CPG_HINT="contoh: /status, /start db, /detail, /help"
 _CPG_LOG="" # mirror of everything printed into the pane, so a resize can repaint it
-_CPG_ALT=0 # 1 while the alternate screen is in use (own scrollback, fixed box)
+_CPG_ALT=0 # 1 while mouse reporting is on (wheel captured, box stays put)
 _CPG_SCROLL=0 # how many lines the pane is scrolled up from the newest output
 
 # Single source of truth for the terminal's size, re-measured on demand.
@@ -891,32 +892,32 @@ _cpg_pinned_ok() {
   (( _CPG_ROWS >= 10 && _CPG_COLS >= 24 ))
 }
 
-# The alternate screen is what actually pins the box against scrolling: on the main
-# screen the wheel moves the *terminal's* viewport, and no application can stop the
-# box from sliding out of view with it. Here the app owns the screen, the wheel is
-# delivered to us as input (SGR mouse reports), and scrolling means repainting the
-# pane from the mirror - the box never moves. Costs: the pane's scrollback is ours,
-# not the terminal's (dumped back to the main screen on exit, so nothing is lost),
-# and selecting text with the mouse needs the terminal's modifier (Option-drag in
-# Terminal.app/iTerm2) while mouse reporting is on. CPG_ALTSCREEN=0 opts out.
-_cpg_alt_on() {
-  [[ "${CPG_ALTSCREEN:-1}" != "0" ]] || return 0
+# Taking the wheel is what pins the box against scrolling. Left alone, the wheel
+# moves the *terminal's* viewport: the box slides out of view and you scroll clean
+# out of cpg's screen into the shell above it. With mouse reporting on, wheel
+# notches arrive here as input instead, and scrolling means repainting the pane from
+# the mirror - so the box never moves and you never leave the app's screen. This is
+# what Claude Code does too (its binary carries the same DECSTBM + SGR-mouse +
+# "jump to bottom" machinery).
+#
+# No alternate screen on purpose: staying on the main screen keeps the terminal's
+# own scrollback and its text selection working. The one cost of mouse reporting is
+# that a plain drag goes to us, not to the terminal, so selecting text needs the
+# terminal's modifier (Option-drag in Terminal.app and iTerm2). CPG_MOUSE=0 turns
+# the capture off and gives the wheel back to the terminal.
+_cpg_mouse_on() {
+  [[ "${CPG_MOUSE:-${CPG_ALTSCREEN:-1}}" != "0" ]] || return 0
   _CPG_ALT=1
-  # ?1049h = alternate screen, ?1000h = report button presses, ?1006h = report them
-  # in SGR form (`ESC [ < b ; x ; y M`), which is the only encoding that survives
-  # coordinates past column 223.
-  printf '\033[?1049h\033[?1000h\033[?1006h'
+  # ?1000h = report button presses (not drags: ?1002/?1003 would take even more of
+  # the mouse away), ?1006h = report them in SGR form (`ESC [ < b ; x ; y M`), the
+  # only encoding that survives coordinates past column 223.
+  printf '\033[?1000h\033[?1006h'
 }
 
-_cpg_alt_off() {
+_cpg_mouse_off() {
   [[ "$_CPG_ALT" == "1" ]] || return 0
   _CPG_ALT=0
-  printf '\033[?1006l\033[?1000l\033[?1049l'
-  # Back on the main screen the session's output would be gone, so hand it over -
-  # the pane's own scrollback, dropped into the real one.
-  if [[ -s "$_CPG_LOG" ]]; then
-    tail -n 500 "$_CPG_LOG"
-  fi
+  printf '\033[?1006l\033[?1000l'
 }
 
 _cpg_region_on() {
@@ -1033,8 +1034,7 @@ _cpg_repaint_pane() {
 }
 
 # Scrolls the pane by $1 lines (negative = back towards the newest output) and
-# repaints. Only possible on the alternate screen: on the main screen the terminal's
-# own viewport does the scrolling and the mirror isn't involved at all.
+# repaints. Needs the wheel/keys to actually reach us, i.e. mouse capture on.
 _cpg_scroll_by() {
   [[ "$_CPG_ALT" == "1" && -s "$_CPG_LOG" ]] || return 0
   local total max want
@@ -1307,9 +1307,9 @@ _cpg_run_line() {
 repl_pinned() {
   _cpg_term_size
   _CPG_LOG=$(mktemp -t cpg-pane 2>/dev/null) || _CPG_LOG=""
-  trap '_cpg_region_off; _cpg_alt_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"' EXIT
+  trap '_cpg_region_off; _cpg_mouse_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"' EXIT
   trap '_CPG_WINCH=1' WINCH
-  _cpg_alt_on
+  _cpg_mouse_on
   printf '\033[2J\033[H\0337' # start clean, pane cursor at the top of the screen
   _cpg_region_on
   _cpg_out _cpg_intro
@@ -1322,7 +1322,7 @@ repl_pinned() {
     if ! _cpg_out _cpg_run_line "$line"; then break; fi
   done
   _cpg_region_off
-  _cpg_alt_off
+  _cpg_mouse_off
   [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"
   trap - EXIT WINCH
   echo "Bye."
