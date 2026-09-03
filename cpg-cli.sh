@@ -70,6 +70,7 @@ declare -A CMD_ALIAS=(
   [remove]=uninstall [unlink]=uninstall
 )
 CMDS=(status start stop restart detail update uninstall)
+IN_REPL=0 # flipped to 1 inside repl() - lets do_update know whether to self-relaunch
 
 if [[ -t 1 ]]; then
   C_GREEN=$'\033[0;32m'; C_YELLOW=$'\033[0;33m'; C_RED=$'\033[0;31m'
@@ -520,6 +521,15 @@ do_update() {
     echo "Re-running install.sh to refresh the cpg wrapper..."
     bash ./install.sh
   fi
+
+  # A running shell keeps the OLD code in memory even after the file on disk changes -
+  # `exec` replaces this process with a fresh one instead of making you exit/reopen
+  # `cpg` by hand. Only when actually in the interactive shell; a one-shot `cpg update`
+  # has nothing to "restart" into.
+  if [[ "$IN_REPL" == "1" ]]; then
+    echo "${C_DIM}Restarting cpg...${C_RESET}"
+    exec bash "$0"
+  fi
 }
 
 # Removes the ~/.local/bin cpg wrapper - never touches this repo, running containers,
@@ -607,6 +617,7 @@ check_for_update() {
 }
 
 repl() {
+  IN_REPL=1
   print_banner
   check_for_update
   echo

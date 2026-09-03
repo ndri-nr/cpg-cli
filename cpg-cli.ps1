@@ -468,6 +468,16 @@ function Invoke-Update {
       Write-Host "Re-running install.ps1 to refresh the cpg wrapper..."
       & "./install.ps1"
     }
+
+    # A running shell keeps the OLD code in memory even after the file on disk
+    # changes - relaunch instead of making you exit/reopen `cpg` by hand. Only when
+    # actually in the interactive shell; a one-shot `cpg update` has nothing to
+    # "restart" into.
+    if ($script:IsRepl) {
+      Write-Host "Restarting cpg..." -ForegroundColor DarkGray
+      & $PSCommandPath
+      exit
+    }
   } finally {
     Pop-Location
   }
@@ -529,6 +539,7 @@ function Test-ForUpdate {
 }
 
 function Start-Repl {
+  $script:IsRepl = $true
   Show-Banner
   Test-ForUpdate
   Write-Host ""
