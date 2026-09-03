@@ -74,6 +74,7 @@ cpg status cache       # just one group
 cpg start [group]      # no group -> pick from what's not fully up yet
 cpg stop  [group]      # no group -> pick from what's actually running
 cpg restart [group]
+cpg detail [group]     # connection info per service: host/port/user/pass/URI
 cpg help
 ```
 

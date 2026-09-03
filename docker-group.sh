@@ -14,6 +14,7 @@
 #   ./docker-group.sh start [group]   start a group (no group = pick from what's not fully up)
 #   ./docker-group.sh stop  [group]   stop a group  (no group = pick from what's running)
 #   ./docker-group.sh restart [group]
+#   ./docker-group.sh detail [group]  connection info (host/port/user/pass/URI) per service
 #   ./docker-group.sh help
 set -euo pipefail
 
@@ -60,7 +61,9 @@ declare -A CMD_ALIAS=(
   [down]=stop [off]=stop [kill]=stop [matiin]=stop [matikan]=stop
   [reboot]=restart [rs]=restart [re]=restart
   [st]=status [ls]=status [list]=status [stat]=status [stats]=status [cek]=status [check]=status
+  [info]=detail [conn]=detail [connection]=detail [creds]=detail [credentials]=detail [cred]=detail
 )
+CMDS=(status start stop restart detail)
 
 if [[ -t 1 ]]; then
   C_GREEN=$'\033[0;32m'; C_YELLOW=$'\033[0;33m'; C_RED=$'\033[0;31m'
@@ -225,6 +228,7 @@ Usage:
   $0 start  [grup]      nyalain grup (tanpa nama -> pilih dari yg belum full up)
   $0 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
   $0 restart [grup]
+  $0 detail [grup]      connection info (host/port/user/pass/URI) per service
 
 Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
@@ -318,6 +322,117 @@ do_restart() {
   dc "$group" restart ${SVC_GROUPS[$group]}
 }
 
+# Connection info per service - host/port/user/pass/URI, whatever you'd need to
+# actually connect from a client or another app. Static reference text (matches what's
+# baked into the compose files), not queried live from the containers.
+show_detail() {
+  local group="${1:-}"
+  if [[ -n "$group" ]]; then
+    if ! group=$(resolve_group_or_die "$group"); then return 1; fi
+  else
+    if ! group=$(menu "Grup mana yang mau dilihat detailnya?" "${GROUP_ORDER[@]}"); then echo "Batal."; return 1; fi
+  fi
+
+  case "$group" in
+    database)
+      cat <<'EOF'
+=== database ===
+
+postgres  (master, read/write, always on)
+  host: localhost   port: 5432   user: admin   pass: password   db: sample
+  psql:  psql -h localhost -p 5432 -U admin -d sample
+  jdbc:  jdbc:postgresql://localhost:5432/sample
+
+postgres-replica-1  (read-only standby, profile: postgres-replica)
+  host: localhost   port: 5443   user: admin   pass: password   db: sample
+
+postgres-replica-2  (read-only standby, profile: postgres-replica)
+  host: localhost   port: 5444   user: admin   pass: password   db: sample
+
+pgpool  (round-robin read routing across replicas, writes -> master, profile: postgres-replica)
+  host: localhost   port: 5433   user: admin   pass: password   db: sample
+  psql:  psql -h localhost -p 5433 -U admin -d sample
+  admin UI login: admin / password
+
+timescaledb
+  host: localhost   port: 6543   user: admin   pass: password   db: sample
+  psql:  psql -h localhost -p 6543 -U admin -d sample
+
+mongodb
+  host: localhost   port: 27017   user: admin   pass: password   db: sample (authSource=admin)
+  uri:   mongodb://admin:password@localhost:27017/sample?authSource=admin
+
+mongo-express  (web UI for mongodb)
+  url: http://localhost:8888
+  basic auth login: admin / admin   <- NOT the same as mongodb's creds above
+EOF
+      ;;
+    cache)
+      cat <<'EOF'
+=== cache ===
+
+redis
+  host: localhost   port: 6379   pass: password
+  cli:  redis-cli -h localhost -p 6379 -a password
+
+redis-insight  (web UI, no login by default)
+  url: http://localhost:5540
+  add connection inside using: host=localhost, port=6379, pass=password
+
+redis-cluster-1..6  (profile: redis-cluster)
+  hosts: localhost:7000-7005   pass: password
+  cli:   redis-cli -c -h localhost -p 7000 -a password   (-c follows MOVED redirects)
+EOF
+      ;;
+    messaging)
+      cat <<'EOF'
+=== messaging ===
+
+rabbitmq
+  amqp:  amqp://admin:password@localhost:5672
+  management UI: http://localhost:15672   login: admin / password
+EOF
+      ;;
+    observability)
+      cat <<'EOF'
+=== observability ===
+
+otel-collector  (no auth)
+  grpc: localhost:4317
+  http: localhost:4318
+
+tempo  (no auth)
+  url: http://localhost:3200
+
+prometheus  (no auth)
+  url: http://localhost:9090
+
+grafana
+  url: http://localhost:3000
+  default login: admin / admin   (Grafana forces a password change on first login)
+EOF
+      ;;
+    quality)
+      cat <<'EOF'
+=== quality ===
+
+sonarqube
+  url: http://localhost:9000
+  default login: admin / admin   (SonarQube forces a password change on first login)
+EOF
+      ;;
+    ai)
+      cat <<'EOF'
+=== ai ===
+
+chromadb  (no auth by default)
+  url: http://localhost:8100
+  heartbeat: http://localhost:8100/api/v2/heartbeat
+EOF
+      ;;
+  esac
+}
+
 # --- REPL (bare `cpg`, no args) --------------------------------------------
 
 repl() {
@@ -339,7 +454,7 @@ repl() {
       -h|--help|help) show_help; continue ;;
     esac
 
-    if ! resolved_cmd=$(resolve_choice "$sub_cmd" CMD_ALIAS status start stop restart); then
+    if ! resolved_cmd=$(resolve_choice "$sub_cmd" CMD_ALIAS "${CMDS[@]}"); then
       echo "Gak ngerti command '$sub_cmd'. /help buat liat commands."
       continue
     fi
@@ -349,6 +464,7 @@ repl() {
       start) do_start "$sub_arg" || true ;;
       stop) do_stop "$sub_arg" || true ;;
       restart) do_restart "$sub_arg" || true ;;
+      detail) show_detail "$sub_arg" || true ;;
     esac
   done
   echo "Bye."
@@ -365,9 +481,9 @@ esac
 
 if [[ -n "$cmd" ]]; then
   case "$cmd" in
-    status|start|stop|restart) : ;;
+    status|start|stop|restart|detail) : ;;
     *)
-      resolved_cmd=$(resolve_choice "$cmd" CMD_ALIAS status start stop restart) || {
+      resolved_cmd=$(resolve_choice "$cmd" CMD_ALIAS "${CMDS[@]}") || {
         echo "Gak ngerti command '$cmd'."
         show_help
         exit 1
@@ -382,5 +498,6 @@ case "$cmd" in
   start) do_start "$arg" ;;
   stop) do_stop "$arg" ;;
   restart) do_restart "$arg" ;;
+  detail) show_detail "$arg" ;;
   "") repl ;;
 esac
