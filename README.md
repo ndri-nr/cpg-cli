@@ -78,25 +78,12 @@ contoh: /status, /start db, /detail, /help
 ╰─────────────────────────────────────────────────────────────────────────────╯
 ```
 
-The box really is pinned: the terminal's own scroll region is cut just above it,
-so a long `docker compose` run scrolls in the pane above while the prompt stays
-put. PageUp/PageDown scroll that pane rather than the window, End (or just
-typing) jumps back to the newest output, and the hint line tells you how far up
-you are. Resizing re-cuts and repaints live, re-fitting the status lines to the
-new width.
-
-The mouse wheel is left to the terminal, so text selection and copy keep
-working - `CPG_MOUSE=1` hands the wheel to cpg instead (pane scrolls under a
-fixed box, but selecting then needs Option-drag). Claude Code draws the line in
-the same place: its renderer only arms mouse tracking on the alternate screen,
-never in the normal REPL.
-
-Line editing is ours rather than readline's: left/right, Home/End,
-backspace/delete, up/down history, Tab completion, Ctrl-A/E/U/K, Ctrl-L to wipe
-the pane, Ctrl-C or Ctrl-D to leave.
-
-No alternate screen either, so the terminal's own scrollback stays intact and
-everything cpg printed is still there after you leave.
+The box really is pinned: the terminal's own scroll region is cut just above
+it, so a long `docker compose` run scrolls in the top pane while the prompt
+stays put, and resizing the window re-cuts and repaints it live. Line editing
+is ours rather than readline's: left/right, Home/End, backspace/delete,
+up/down history, Tab completion, Ctrl-A/E/U/K, Ctrl-L to wipe the top pane,
+Ctrl-C or Ctrl-D to leave.
 
 Needs a terminal it can measure and address (and bash 4+ for `cpg-cli.sh` -
 macOS ships bash 3.2, so `brew install bash`). Anywhere it can't - piped
