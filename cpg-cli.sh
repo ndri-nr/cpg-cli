@@ -661,23 +661,14 @@ hr() {
   echo
 }
 
-# Fired on SIGWINCH while `read -e` is waiting at the boxed prompt, so resizing
-# mid-type redraws the border NOW instead of only on the next Enter. Cursor sits
-# on the blank input line (between the two borders) when this fires - `tput sc`
-# saves that exact spot, then we hop up 1 line to redraw the top border, hop
-# down 2 to redraw the bottom one, and `tput rc` snaps back regardless of which
-# lines we visited in between. `tput el` clears leftover chars if the new width
-# is narrower than the old one.
-_cpg_redraw_borders() {
-  tput sc 2>/dev/null || return
-  tput cuu 1 2>/dev/null
-  printf '\r'; tput el 2>/dev/null
-  printf '%s' "$C_DIM"; hr; printf '%s' "$C_RESET"
-  tput cud 2 2>/dev/null
-  printf '\r'; tput el 2>/dev/null
-  printf '%s' "$C_DIM"; hr; printf '%s' "$C_RESET"
-  tput rc 2>/dev/null
-}
+# Tried a SIGWINCH trap here to redraw borders live mid-type - reverted. `read -e`
+# (GNU readline) keeps its own internal model of cursor/line position; a trap
+# handler poking the terminal directly with `tput` behind its back desyncs that
+# model, and every WINCH after the first prints in the wrong place - borders pile
+# up instead of redrawing in place. Not fixable without replacing `read -e` with
+# a raw-keystroke input loop that owns the terminal outright (see
+# docs/pinned-bottom-input-plan.md). Resize still reflows correctly on the next
+# Enter, same as before.
 
 repl() {
   IN_REPL=1
@@ -712,14 +703,10 @@ repl() {
     # escape bytes into the buffer (garbled input, cursor jumps around but doesn't
     # actually navigate). `history -s` after each line makes up/down arrow recall
     # previous commands too, like a real shell.
-    # Trap only wraps the read - a redraw mid command-output would corrupt whatever
-    # else is on screen, so it's off everywhere else in the loop. `|| rc=$?` (not
-    # `; rc=$?`) because `set -e` is on: a bare failing command outside a tested
-    # context would kill the whole script before `rc` is even read.
+    # `|| rc=$?` (not `; rc=$?`) because `set -e` is on: a bare failing command
+    # outside a tested context would kill the whole script before `rc` is read.
     rc=0
-    trap _cpg_redraw_borders WINCH
     read -e -rp "${C_ACCENT}❯${C_RESET} " line || rc=$?
-    trap - WINCH
     if [[ $rc -ne 0 ]]; then
       echo
       break
