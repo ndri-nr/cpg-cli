@@ -889,16 +889,22 @@ _cpg_out() {
 # inside the box. Long input scrolls horizontally (the window ends at the cursor)
 # instead of wrapping - a wrapped line would grow into the border row.
 _cpg_render() {
-  local avail=$(( _CPG_COLS - 6 )) start=0 view
+  local avail=$(( _CPG_COLS - 6 )) start=0 view bar out
   (( avail < 8 )) && avail=8
   (( _CPG_POS > avail )) && start=$(( _CPG_POS - avail ))
   view="${_CPG_BUF:start:avail}"
-  printf '\033[%d;1H\033[2K%s%s%s' $(( _CPG_ROWS - 3 )) "$C_DIM" "${_CPG_HINT:0:_CPG_COLS}" "$C_RESET"
-  printf '\033[%d;1H\033[2K%s╭%s╮%s' $(( _CPG_ROWS - 2 )) "$C_DIM" "${_CPG_BAR:0:$(( _CPG_COLS - 2 ))}" "$C_RESET"
-  printf '\033[%d;1H\033[2K%s│%s %s❯%s %s' $(( _CPG_ROWS - 1 )) "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$view"
-  printf '\033[%d;%dH%s│%s' $(( _CPG_ROWS - 1 )) "$_CPG_COLS" "$C_DIM" "$C_RESET"
-  printf '\033[%d;1H\033[2K%s╰%s╯%s' "$_CPG_ROWS" "$C_DIM" "${_CPG_BAR:0:$(( _CPG_COLS - 2 ))}" "$C_RESET"
-  printf '\033[%d;%dH' $(( _CPG_ROWS - 1 )) $(( _CPG_POS - start + 5 ))
+  bar="${_CPG_BAR:0:$(( _CPG_COLS - 2 ))}"
+  # Built as one string and written once, with the cursor hidden across it. Six
+  # separate printfs let the terminal paint half-finished states - visible as a
+  # flicker on every keystroke, and as a stuttering box while dragging a resize.
+  printf -v out '\033[?25l\033[%d;1H\033[2K%s%s%s\033[%d;1H\033[2K%s╭%s╮%s\033[%d;1H\033[2K%s│%s %s❯%s %s\033[%d;%dH%s│%s\033[%d;1H\033[2K%s╰%s╯%s\033[%d;%dH\033[?25h' \
+    $(( _CPG_ROWS - 3 )) "$C_DIM" "${_CPG_HINT:0:_CPG_COLS}" "$C_RESET" \
+    $(( _CPG_ROWS - 2 )) "$C_DIM" "$bar" "$C_RESET" \
+    $(( _CPG_ROWS - 1 )) "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$view" \
+    $(( _CPG_ROWS - 1 )) "$_CPG_COLS" "$C_DIM" "$C_RESET" \
+    "$_CPG_ROWS" "$C_DIM" "$bar" "$C_RESET" \
+    $(( _CPG_ROWS - 1 )) $(( _CPG_POS - start + 5 ))
+  printf '%s' "$out"
 }
 
 # Pushes the whole visible screen up into the scrollback: margins off (a full-screen
@@ -907,26 +913,23 @@ _cpg_render() {
 # there as leftover borders stacking under the new box - the emulator never says how
 # it reflowed, and nothing here mirrors the pane's content to repaint it. The output
 # isn't lost, it's one scroll up.
-_cpg_flush_screen() {
-  local i
-  printf '\033[r\033[%d;1H' "$_CPG_ROWS"
-  for (( i = 0; i < _CPG_ROWS; i++ )); do
-    printf '\n'
-  done
-}
-
-# Re-measures once per idle second and repaints only when the window really changed.
+# Re-measures and repaints only when the window really changed. The pane's content is
+# left exactly as the emulator reflowed it - wiping it (an earlier attempt did) reads
+# as "the resize cleared my screen", and nothing here mirrors the output to put it
+# back. Where the box used to sit is cleared as part of the repaint; Ctrl-L wipes the
+# pane if a reflow does leave something ugly behind.
 _cpg_poll_resize() {
   local pr=$_CPG_ROWS pc=$_CPG_COLS
   _cpg_term_size
   if (( pr == _CPG_ROWS && pc == _CPG_COLS )); then
     return 0
   fi
-  # Only a shrink (or any width change, which re-wraps every line in the pane) leaves
-  # stale rows behind. Growing taller just hands us blank rows at the bottom, so the
-  # pane is still intact - re-cut and repaint, keep the output on screen.
-  if (( _CPG_ROWS < pr || _CPG_COLS != pc )); then
-    _cpg_flush_screen
+  # Growing taller leaves the old box stranded in the middle of the (now taller)
+  # pane, with only blank rows below it - erase from there down. Shrinking doesn't
+  # need it: the emulator shifts the screen up by exactly the rows it dropped, so the
+  # old box lands on the new box's rows and the repaint covers it.
+  if (( _CPG_ROWS > pr && pr > 3 )); then
+    printf '\033[r\033[%d;1H\033[0J' $(( pr - 3 ))
   fi
   printf '\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
   _cpg_render
@@ -936,20 +939,28 @@ _cpg_poll_resize() {
 # returns 0 on Enter; returns 1 on Ctrl-C / Ctrl-D / EOF (i.e. "leave the REPL").
 _cpg_read_line() {
   _CPG_BUF=""; _CPG_POS=0
-  local key seq junk rc saved="" hidx=${#_CPG_HIST[@]}
+  local key seq junk rc saved="" ticks=0 hidx=${#_CPG_HIST[@]}
   _cpg_render
   while true; do
     rc=0
-    # 1s timeout, not a blocking read: a resize has to be noticed while idle at the
-    # prompt, and bash only reports a trapped SIGWINCH here on some versions (older
-    # ones restart the read instead). Each timeout re-measures the terminal, which
-    # catches the resize either way. Typing is unaffected - a keypress returns at once.
-    IFS= read -rsn1 -t 1 key || rc=$?
+    # Short timeout, not a blocking read: a resize has to be noticed while idle at
+    # the prompt. bash runs the WINCH trap only after the read returns (it doesn't
+    # interrupt it), so the tick length *is* the resize latency - 1s felt like the
+    # box lagging behind the window while dragging. Typing is unaffected: a keypress
+    # returns at once.
+    IFS= read -rsn1 -t 0.2 key || rc=$?
     if (( rc != 0 )); then
       # >128 = timeout or interrupting signal; anything else is a real EOF.
       if (( rc > 128 )); then
-        _CPG_WINCH=0
-        _cpg_poll_resize
+        # `stty size` costs a subprocess, so only measure when SIGWINCH says the
+        # window moved - or once a second regardless, for shells/terminals where
+        # that signal never arrives.
+        ticks=$(( ticks + 1 ))
+        if (( _CPG_WINCH || ticks >= 5 )); then
+          _CPG_WINCH=0
+          ticks=0
+          _cpg_poll_resize
+        fi
         continue
       fi
       _CPG_LINE=""

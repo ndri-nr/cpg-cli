@@ -804,16 +804,6 @@ function Enter-Pane {
   Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H`r`n"
 }
 
-# Pushes the whole visible screen up into the scrollback: margins off (a full-screen
-# scroll is the only kind the emulator keeps), one newline per row, done. Used after a
-# shrink, where the old box rows get reflowed up into the scroll pane and would sit
-# there as leftover borders stacking under the new box - the emulator never says how
-# it reflowed, and nothing here mirrors the pane's content to repaint it. The output
-# isn't lost, it's one scroll up.
-function Clear-PaneToScrollback {
-  Write-Vt ("$($script:E)[r$($script:E)[$($script:PinnedRows);1H" + ("`r`n" * $script:PinnedRows))
-}
-
 # Repaints the 4 pinned rows and parks the cursor inside the box. Long input scrolls
 # horizontally (the window ends at the cursor) instead of wrapping - a wrapped line
 # would grow into the border row.
@@ -834,12 +824,15 @@ function Show-PinnedPrompt([string]$buf, [int]$pos) {
   $dim = "$e[2m"
   $accent = "$e[38;5;209m"
   $reset = "$e[0m"
-  $out = "$e[$($rows - 3);1H$e[2K$dim$hint$reset"
+  # Cursor hidden across the write, so a repaint can't be seen half-finished (that
+  # shows up as a flicker per keystroke and a stuttering box while dragging a resize).
+  $out = "$e[?25l"
+  $out += "$e[$($rows - 3);1H$e[2K$dim$hint$reset"
   $out += "$e[$($rows - 2);1H$e[2K$dim╭$bar╮$reset"
   $out += "$e[$($rows - 1);1H$e[2K$dim│$reset $accent❯$reset $view"
   $out += "$e[$($rows - 1);${cols}H$dim│$reset"
   $out += "$e[$rows;1H$e[2K$dim╰$bar╯$reset"
-  $out += "$e[$($rows - 1);$($pos - $start + 5)H"
+  $out += "$e[$($rows - 1);$($pos - $start + 5)H$e[?25h"
   Write-Vt $out
 }
 
@@ -885,11 +878,15 @@ function Read-PinnedLine {
       $pc = $script:PinnedCols
       Update-TermSize
       if ($pr -ne $script:PinnedRows -or $pc -ne $script:PinnedCols) {
-        # Only a shrink (or any width change, which re-wraps every line in the pane)
-        # leaves stale rows behind. Growing taller just hands us blank rows at the
-        # bottom, so the pane is still intact - repaint and keep the output on screen.
-        if ($script:PinnedRows -lt $pr -or $script:PinnedCols -ne $pc) {
-          Clear-PaneToScrollback
+        # The pane's content is left exactly as the emulator reflowed it - wiping it
+        # (an earlier attempt did) reads as "the resize cleared my screen", and
+        # nothing here mirrors the output to put it back. Growing taller does strand
+        # the old box mid-pane with only blank rows below, so erase from there down;
+        # shrinking needs nothing, the screen shifts up by the rows it dropped and
+        # the old box lands where the repaint covers it. Ctrl-L wipes the pane if a
+        # reflow leaves something ugly behind.
+        if ($script:PinnedRows -gt $pr -and $pr -gt 3) {
+          Write-Vt "$($script:E)[r$($script:E)[$($pr - 3);1H$($script:E)[0J"
         }
         Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H"
         Show-PinnedPrompt $buf $pos
