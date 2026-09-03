@@ -80,8 +80,9 @@ Bye.
 ```
 
 (the full member list per group still lives in `/detail <group>` - the status
-view only ever shows a couple of names + a count, on purpose, so it stays
-readable without a maximized terminal)
+view fits as many names as your current terminal width allows and shows
+"+N lainnya" for the rest, so it re-flows narrower or wider depending on how
+big your terminal is, down to just "N container" if even one name won't fit)
 
 Or run one-shot from a normal shell:
 

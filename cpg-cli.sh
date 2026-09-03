@@ -202,24 +202,48 @@ print_status() {
   if [[ -n "$filter" ]]; then
     if ! filter=$(resolve_group_or_die "$filter"); then return 1; fi
   fi
+  local term_width
+  term_width=$(tput cols 2>/dev/null) || term_width=80
+
   for group in "${GROUP_ORDER[@]}"; do
     [[ -n "$filter" && "$group" != "$filter" ]] && continue
     read -r running total <<<"$(group_counts "$group")"
     local state; state=$(group_state "$running" "$total")
     local color; color=$(state_color "$state")
+
     # Full member list lives in `/detail <group>` - showing all of them here made the
-    # line unreadably wide on anything but a maximized terminal. Just a taste + count.
-    # $IFS-based joins only ever use IFS's FIRST character as the separator (not the
-    # whole string), so `IFS=', '` silently drops the space - printf is the reliable
-    # way to join with a literal ", ".
-    local svc_arr=(${SVC_GROUPS[$group]}) services
-    if (( ${#svc_arr[@]} > 2 )); then
-      printf -v services '%s, ' "${svc_arr[@]:0:2}"
-      services="${services%, }, +$(( ${#svc_arr[@]} - 2 )) lainnya"
+    # line unreadably wide on anything but a maximized terminal. Fit as many names as
+    # actually fit the current terminal width, "+N lainnya" for the rest - re-measured
+    # every render, so it re-flows on the next redraw after a resize (see `hr`/`tput
+    # cols` - same story, this isn't a live mid-resize repaint either).
+    local plain_prefix
+    printf -v plain_prefix "  ● %-15s%2s/%-2s  " "$group" "$running" "$total"
+    local avail=$(( term_width - ${#plain_prefix} ))
+    (( avail < 0 )) && avail=0
+
+    local svc_arr=(${SVC_GROUPS[$group]}) total_svc=${#svc_arr[@]}
+    local shown=() cur_str="" i candidate tentative remaining tentative_full
+    for (( i = 0; i < total_svc; i++ )); do
+      candidate="${svc_arr[$i]}"
+      if [[ -n "$cur_str" ]]; then tentative="$cur_str, $candidate"; else tentative="$candidate"; fi
+      remaining=$(( total_svc - (i + 1) ))
+      tentative_full="$tentative"
+      (( remaining > 0 )) && tentative_full="$tentative, +$remaining lainnya"
+      (( ${#tentative_full} > avail )) && break
+      cur_str="$tentative"
+      shown+=("$candidate")
+    done
+
+    local services
+    if [[ ${#shown[@]} -eq 0 ]]; then
+      # Not even one name fits - just say how many there are.
+      services="$total_svc container"
     else
-      printf -v services '%s, ' "${svc_arr[@]}"
-      services="${services%, }"
+      services="$cur_str"
+      remaining=$(( total_svc - ${#shown[@]} ))
+      (( remaining > 0 )) && services="$services, +$remaining lainnya"
     fi
+
     printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
       "$color" "$C_RESET" "$group" \
       "$color" "$running" "$total" "$C_RESET" \

@@ -167,16 +167,39 @@ function Get-GroupState($groupName) {
 
 function Write-GroupLine($info) {
   $color = switch ($info.State) { "up" { "Green" }; "partial" { "Yellow" }; "down" { "Red" } }
+  $plainPrefix = "  ● {0,-15}{1,2}/{2,-2}  " -f $info.Group, $info.Running, $info.Total
   Write-Host -NoNewline "  ● " -ForegroundColor $color
   Write-Host -NoNewline ("{0,-15}" -f $info.Group)
   Write-Host -NoNewline -ForegroundColor $color ("{0,2}/{1,-2}  " -f $info.Running, $info.Total)
+
   # Full member list lives in `/detail <group>` - showing all of them here made the
-  # line unreadably wide on anything but a maximized terminal. Just a taste + count.
-  if ($info.Services.Count -gt 2) {
-    $svcText = ($info.Services | Select-Object -First 2) -join ", "
-    $svcText += ", +$($info.Services.Count - 2) lainnya"
+  # line unreadably wide on anything but a maximized terminal. Fit as many names as
+  # actually fit the current terminal width, "+N lainnya" for the rest - re-measured
+  # every render, so it re-flows on the next redraw after a resize (this isn't a live
+  # mid-resize repaint either - see Get-Hr).
+  $width = $Host.UI.RawUI.WindowSize.Width
+  if (-not $width -or $width -lt 1) { $width = 80 }
+  $avail = [Math]::Max(0, $width - $plainPrefix.Length)
+
+  $shown = [System.Collections.Generic.List[string]]::new()
+  $curStr = ""
+  for ($i = 0; $i -lt $info.Services.Count; $i++) {
+    $candidate = $info.Services[$i]
+    $tentative = if ($curStr) { "$curStr, $candidate" } else { $candidate }
+    $remaining = $info.Services.Count - ($i + 1)
+    $tentativeFull = if ($remaining -gt 0) { "$tentative, +$remaining lainnya" } else { $tentative }
+    if ($tentativeFull.Length -gt $avail) { break }
+    $curStr = $tentative
+    $shown.Add($candidate)
+  }
+
+  if ($shown.Count -eq 0) {
+    # Not even one name fits - just say how many there are.
+    $svcText = "$($info.Services.Count) container"
   } else {
-    $svcText = $info.Services -join ", "
+    $svcText = $curStr
+    $remaining = $info.Services.Count - $shown.Count
+    if ($remaining -gt 0) { $svcText += ", +$remaining lainnya" }
   }
   Write-Host $svcText -ForegroundColor DarkGray
 }
