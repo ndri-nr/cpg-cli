@@ -303,7 +303,10 @@ _cpg_group_line() {
   fi
   services="$services$dormant_note"
 
-  printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
+  # Into a variable, not straight to stdout: the resize/scroll repaint needs the
+  # text to measure it, and a `$(...)` per line there cost dozens of subshells per
+  # keypress - enough to feel like lag while scrolling.
+  printf -v _CPG_LINE_OUT "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s" \
     "$color" "$C_RESET" "$group" \
     "$color" "$running" "$total" "$C_RESET" \
     "$C_DIM" "$services" "$C_RESET"
@@ -330,6 +333,7 @@ print_status() {
         "$group" "$G_RUNNING" "$G_TOTAL" "$G_DORMANT" "${G_ACTIVE[*]:-}" >> "$snap"
     fi
     _cpg_group_line "$group" "$G_RUNNING" "$G_TOTAL" "$G_DORMANT" "${G_ACTIVE[*]:-}"
+    printf '%s\n' "$_CPG_LINE_OUT"
   done
 }
 
@@ -375,10 +379,10 @@ Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
 Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
-Scroll area output: Ctrl+B (ke atas) / Ctrl+F (ke bawah) - selalu jalan. Shift+↑ /
-Shift+↓ juga dicoba, tapi sebagian terminal (Terminal.app) makan chord itu buat
-scroll-nya sendiri. Kotak input tetep di bawah, gak kegeser. Ngetik apa aja =
-balik ke output terbaru. Select/copy normal. CPG_ALTSCREEN=0 buat layar biasa.
+Scroll area output: Fn+↑ / Fn+↓ (setengah layar) atau Option+↑ / Option+↓ (3 baris).
+Ctrl+B / Ctrl+F juga bisa. Shift+↑/↓ kebind tapi Terminal.app nyimpen chord itu buat
+dirinya sendiri, jadi gak nyampe. Kotak input tetep di bawah, gak kegeser. Ngetik
+apa aja = balik ke output terbaru. Select/copy normal. CPG_ALTSCREEN=0 = layar biasa.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -857,6 +861,8 @@ _CPG_LOG="" # mirror of everything printed into the pane: what a resize or a scr
             # repaints from
 _CPG_ALT=0 # 1 while the alternate screen is in use
 _CPG_SCROLL=0 # how many lines the pane is scrolled back from the newest output
+_CPG_TOTAL=0 # mirror line count, refreshed by _cpg_repaint_pane
+_CPG_PLAIN=""; _CPG_RH=1; _CPG_REFIT=""; _CPG_LINE_OUT=""; _CPG_SCROLL_MAX=0
 
 # Single source of truth for the terminal's size, re-measured on demand.
 # `stty size` reads the window off stdin; `tput lines/cols` asks *stderr* on some
@@ -993,7 +999,7 @@ _cpg_plain() {
     out+="${BASH_REMATCH[1]}"
     s="${BASH_REMATCH[2]}"
   done
-  printf '%s' "$out$s"
+  _CPG_PLAIN="$out$s"
 }
 
 # A replayed status line is text laid out for the OLD width, so after a resize it
@@ -1001,30 +1007,58 @@ _cpg_plain() {
 # behind: same fit-as-many logic, new width, still exactly one row. Anything else
 # (docker output, /detail) replays as-is - it's plain prose, not a fitted list.
 _cpg_status_refit() {
-  local line="$1" plain group running total dormant services snap="$_CPG_LOG.status"
-  [[ -s "$snap" ]] || { printf '%s\n' "$line"; return 0; }
-  plain=$(_cpg_plain "$line")
-  if [[ ! "$plain" =~ ^[[:space:]]+●[[:space:]]+([a-z][a-z-]*)[[:space:]] ]]; then
-    printf '%s\n' "$line"
+  local line="$1" group g running total dormant services snap="$_CPG_LOG.status"
+  _CPG_REFIT="$line"
+  [[ -s "$snap" ]] || return 0
+  _cpg_plain "$line"
+  if [[ ! "$_CPG_PLAIN" =~ ^[[:space:]]+●[[:space:]]+([a-z][a-z-]*)[[:space:]] ]]; then
     return 0
   fi
   group="${BASH_REMATCH[1]}"
   while IFS=$'\t' read -r g running total dormant services; do
     if [[ "$g" == "$group" ]]; then
       _cpg_group_line "$group" "$running" "$total" "$dormant" "$services"
+      _CPG_REFIT="$_CPG_LINE_OUT"
       return 0
     fi
   done < "$snap"
-  printf '%s\n' "$line"
+  :
+}
+
+# How many rows one line takes on screen (sets _CPG_RH): wider than the terminal
+# means it wraps.
+_cpg_line_rows() {
+  _cpg_plain "$1"
+  _CPG_RH=$(( (${#_CPG_PLAIN} + _CPG_COLS - 1) / _CPG_COLS ))
+  (( _CPG_RH < 1 )) && _CPG_RH=1
+  :
+}
+
+# Furthest scroll offset that still fills the pane, in LINES. Not `total - pane
+# height`: wrapped lines take more than one row each, so that stopped a few lines
+# short of the top and the first lines were unreachable. Counts from the oldest line
+# instead - how many of them fit one paneful - and stops there.
+_cpg_scroll_max() {
+  local total k=0 rows=0 line
+  total=$(wc -l < "$_CPG_LOG")
+  while IFS= read -r line; do
+    _cpg_line_rows "$line"
+    (( rows + _CPG_RH > _CPG_BOTTOM )) && break
+    rows=$(( rows + _CPG_RH ))
+    k=$(( k + 1 ))
+  done < "$_CPG_LOG"
+  (( k < 1 )) && k=1
+  _CPG_SCROLL_MAX=$(( total - k ))
+  (( _CPG_SCROLL_MAX < 0 )) && _CPG_SCROLL_MAX=0
+  :
 }
 
 # Scrolls the pane by $1 lines (negative = towards the newest output) and repaints.
 _cpg_scroll_by() {
   [[ -s "$_CPG_LOG" ]] || return 0
-  local total max want
-  total=$(wc -l < "$_CPG_LOG")
-  max=$(( total - _CPG_BOTTOM ))
-  (( max < 0 )) && max=0
+  local max want
+  _cpg_scroll_max
+  max=$_CPG_SCROLL_MAX
   want=$(( _CPG_SCROLL + $1 ))
   (( want < 0 )) && want=0
   (( want > max )) && want=$max
@@ -1043,15 +1077,44 @@ _cpg_scroll_reset() {
 
 _cpg_repaint_pane() {
   printf '\033[r\033[1;1H\033[0J\033[1;%dr\033[1;1H' "$_CPG_BOTTOM"
-  # Replayed from row 1 down, same as a fresh pane: short output stays at the top,
-  # a full screenful scrolls itself into place. DECSC (ESC 7) at the end hands the
-  # position back to _cpg_out for the next command.
-  if [[ -s "$_CPG_LOG" ]]; then
-    local line
-    while IFS= read -r line; do
-      _cpg_status_refit "$line"
-    done < <(tail -n "$(( _CPG_BOTTOM + _CPG_SCROLL ))" "$_CPG_LOG" | head -n "$_CPG_BOTTOM")
+  [[ -s "$_CPG_LOG" ]] || { printf '\0337'; return 0; }
+  _CPG_TOTAL=$(wc -l < "$_CPG_LOG")
+
+  # Candidates: everything that could land on screen at this scroll offset, oldest
+  # first, ending exactly _CPG_SCROLL lines before the newest output. Twice the pane
+  # height, because a line wider than the terminal costs two screen rows or more and
+  # fewer lines then fit.
+  local -a out=() high=()
+  local line
+  while IFS= read -r line; do
+    _cpg_status_refit "$line"
+    _cpg_line_rows "$_CPG_REFIT"
+    out+=("$_CPG_REFIT"); high+=("$_CPG_RH")
+    # `head -n <end>` first, then `tail`: the window ENDS _CPG_SCROLL lines before the
+    # newest line, and picking it with `tail | head` only lands there while the file
+    # is longer than the window - on a short mirror it silently returned the wrong
+    # slice, so the top of the output stayed unreachable.
+  done < <(head -n "$(( _CPG_TOTAL - _CPG_SCROLL ))" "$_CPG_LOG" | tail -n "$(( _CPG_BOTTOM * 2 ))")
+
+  local n=${#out[@]} i rows=0 start=0
+  if (( n > 0 )); then
+    start=$n
+    # Fill the pane from the newest candidate backwards, counting SCREEN rows, not
+    # lines - counting lines is what cut the top line off: 20 lines of which a few
+    # wrapped needed 21+ rows, and the overflow scrolled the first one away.
+    for (( i = n - 1; i >= 0; i-- )); do
+      (( rows + high[i] > _CPG_BOTTOM )) && break
+      rows=$(( rows + high[i] ))
+      start=$i
+    done
   fi
+
+  local first=1
+  for (( i = start; i < n; i++ )); do
+    if (( first )); then first=0; else printf '\n'; fi
+    printf '%s' "${out[i]}"
+  done
+  # DECSC (ESC 7) hands the position back to _cpg_out for the next command.
   printf '\0337'
 }
 
@@ -1068,7 +1131,7 @@ _cpg_render() {
   # separate printfs let the terminal paint half-finished states - visible as a
   # flicker on every keystroke, and as a stuttering box while dragging a resize.
   local hint="$_CPG_HINT"
-  (( _CPG_SCROLL > 0 )) && hint="↑ $_CPG_SCROLL baris ke atas · Ctrl+F / Shift+↓ / ngetik buat balik"
+  (( _CPG_SCROLL > 0 )) && hint="↑ $_CPG_SCROLL baris · Fn/Option+↓ buat balik, atau langsung ngetik"
   printf -v out '\033[?25l\033[%d;1H\033[2K%s%s%s\033[%d;1H\033[2K%s╭%s╮%s\033[%d;1H\033[2K%s│%s %s❯%s %s\033[%d;%dH%s│%s\033[%d;1H\033[2K%s╰%s╯%s\033[%d;%dH\033[?25h' \
     $(( _CPG_ROWS - 3 )) "$C_DIM" "${hint:0:_CPG_COLS}" "$C_RESET" \
     $(( _CPG_ROWS - 2 )) "$C_DIM" "$bar" "$C_RESET" \
@@ -1103,7 +1166,7 @@ _cpg_poll_resize() {
 # returns 0 on Enter; returns 1 on Ctrl-C / Ctrl-D / EOF (i.e. "leave the REPL").
 _cpg_read_line() {
   _CPG_BUF=""; _CPG_POS=0
-  local key seq junk rc saved="" ticks=0 hidx=${#_CPG_HIST[@]}
+  local key seq junk rc meta=0 saved="" ticks=0 hidx=${#_CPG_HIST[@]}
   _cpg_render
   while true; do
     rc=0
@@ -1175,6 +1238,15 @@ _cpg_read_line() {
         # The short timeout keeps a bare Escape keypress from hanging the loop.
         seq=""
         IFS= read -rsn1 -t 0.05 junk || true
+        # Option+key arrives as ESC-prefixed: Option+Up is `ESC ESC [ A` in
+        # Terminal.app. Skip the second ESC and read the sequence that follows, or
+        # the `[A` leaks into the input line as literal text.
+        if [[ "$junk" == $'\033' ]]; then
+          meta=1
+          IFS= read -rsn1 -t 0.05 junk || true
+        else
+          meta=0
+        fi
         case "$junk" in
           '[')
             while IFS= read -rsn1 -t 0.05 junk; do
@@ -1187,9 +1259,21 @@ _cpg_read_line() {
             seq="$junk" ;;
           *) seq="" ;;
         esac
+        # Option+arrow (meta) scrolls too - it sits right next to the arrow keys,
+        # which Ctrl-B/Ctrl-F does not.
+        if (( meta )); then
+          case "$seq" in
+            'A') _cpg_scroll_by 3; continue ;;
+            'B') _cpg_scroll_by -3; continue ;;
+          esac
+        fi
         case "$seq" in
-          '1;2A'|'1;5A'|'1;3A'|'5~') _cpg_scroll_by 3; continue ;;  # Shift/Ctrl/Alt-Up, PageUp
-          '1;2B'|'1;5B'|'1;3B'|'6~') _cpg_scroll_by -3; continue ;; # ...-Down, PageDown
+          # Scroll: Option/Shift/Ctrl + arrows (whichever the terminal forwards), and
+          # Fn+Up/Fn+Down, which is what PageUp/PageDown are on a Mac keyboard.
+          '1;2A'|'1;5A'|'1;3A'|'1;9A') _cpg_scroll_by 3; continue ;;
+          '1;2B'|'1;5B'|'1;3B'|'1;9B') _cpg_scroll_by -3; continue ;;
+          '5~') _cpg_scroll_by "$(( _CPG_BOTTOM / 2 ))"; continue ;;
+          '6~') _cpg_scroll_by "-$(( _CPG_BOTTOM / 2 ))"; continue ;;
           'A') # history back
             _cpg_scroll_reset
             if (( hidx > 0 )); then
