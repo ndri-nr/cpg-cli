@@ -66,13 +66,16 @@ $ cpg
   ● quality         1/1   sonarqube
   ● ai              1/1   chromadb
 
+─────────────────────────────────────
+contoh: /status, /start db, /detail, /help
 ❯ /stop cache
+─────────────────────────────────────
 ▸ docker compose -f compose/cache.yml stop redis redis-insight ...
 
-❯ /start database
-...
-
+─────────────────────────────────────
+contoh: /status, /start db, /detail, /help
 ❯ /exit
+─────────────────────────────────────
 Bye.
 ```
 

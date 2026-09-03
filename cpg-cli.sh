@@ -642,6 +642,14 @@ repl() {
   bind -x '"\t": _cpg_tab_complete' 2>/dev/null || true
   while true; do
     echo
+    # A framed input area, like Claude Code's own prompt box - just re-drawn fresh
+    # each turn (a real *pinned*, live-redrawing box needs raw-mode/curses, out of
+    # reach for a plain `read`). No inline vanish-on-type placeholder either - that
+    # needs readline to know about text it never put there itself, so backspace/arrow
+    # keys would visibly desync from what's actually in the edit buffer. This hint
+    # line is the safe equivalent.
+    echo "${C_DIM}─────────────────────────────────────${C_RESET}"
+    echo "${C_DIM}contoh: /status, /start db, /detail, /help${C_RESET}"
     # `-e` turns on readline for this read - without it, arrow keys just dump raw
     # escape bytes into the buffer (garbled input, cursor jumps around but doesn't
     # actually navigate). `history -s` after each line makes up/down arrow recall
@@ -650,6 +658,7 @@ repl() {
       echo
       break
     fi
+    echo "${C_DIM}─────────────────────────────────────${C_RESET}"
     [[ -n "${line// }" ]] && history -s "$line"
     line="${line#/}"
     [[ -z "$line" ]] && continue

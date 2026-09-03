@@ -554,8 +554,16 @@ function Start-Repl {
   Show-Status ""
   while ($true) {
     Write-Host ""
+    # A framed input area, like Claude Code's own prompt box - just re-drawn fresh
+    # each turn (a real *pinned*, live-redrawing box needs raw-mode console reading,
+    # out of reach for a plain Read-Host). No inline vanish-on-type placeholder either
+    # - Read-Host has no hook to draw one that disappears the moment you type. This
+    # hint line is the safe equivalent.
+    Write-Host "─────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "contoh: /status, /start db, /detail, /help" -ForegroundColor DarkGray
     Write-Host -NoNewline "❯ " -ForegroundColor DarkYellow
     $line = Read-Host
+    Write-Host "─────────────────────────────────────" -ForegroundColor DarkGray
     if ($null -eq $line) { break }
     $line = $line.TrimStart("/")
     if (-not $line.Trim()) { continue }
