@@ -50,7 +50,8 @@ from PATH if you added it just for this), then remove the cloned folder
 
 ## The `cpg` CLI
 
-Run it bare to drop into an interactive shell - like `claude`'s own REPL:
+Run it bare to drop into an interactive shell - like `claude`'s own REPL, input
+box pinned to the bottom of the terminal and output scrolling above it:
 
 ```
 $ cpg
@@ -66,18 +67,28 @@ $ cpg
   ● quality         1/1   sonarqube
   ● ai              1/1   chromadb
 
-─────────────────────────────────────
-contoh: /status, /start db, /detail, /help
 ❯ /stop cache
-─────────────────────────────────────
 ▸ docker compose -f compose/cache.yml stop redis redis-insight ...
 
-─────────────────────────────────────
+                        ^ everything above scrolls; the box below never moves
+
 contoh: /status, /start db, /detail, /help
-❯ /exit
-─────────────────────────────────────
-Bye.
+╭─────────────────────────────────────────────────────────────────────────────╮
+│ ❯ /det                                                                      │
+╰─────────────────────────────────────────────────────────────────────────────╯
 ```
+
+The box really is pinned: the terminal's own scroll region is cut just above
+it, so a long `docker compose` run scrolls in the top pane while the prompt
+stays put, and resizing the window re-cuts and repaints it live. Line editing
+is ours rather than readline's: left/right, Home/End, backspace/delete,
+up/down history, Tab completion, Ctrl-A/E/U/K, Ctrl-L to wipe the top pane,
+Ctrl-C or Ctrl-D to leave.
+
+Needs a terminal it can measure and address (and bash 4+ for `cpg-cli.sh` -
+macOS ships bash 3.2, so `brew install bash`). Anywhere it can't - piped
+input, a tiny window, Windows' legacy conhost, or `CPG_PINNED=0` if you just
+prefer it - the older per-turn prompt box is used instead, same commands.
 
 (the full member list per group still lives in `/detail <group>` - the status
 view fits as many names as your current terminal width allows and shows
@@ -105,10 +116,10 @@ unique prefixes (`obs` -> `observability`), and asks "did you mean X?" on a
 close typo. Even a typo too far off to auto-confirm still gets a ranked
 "mirip² gini: ..." recommendation instead of a flat "not found". A bad name
 in a multi-group batch (`/start db xyz ai`) just gets skipped with a message
-- the rest of the batch still runs. In the `cpg-cli.sh` REPL specifically,
-Tab also autocompletes `/command` names and group names live as you type
-(readline hook - not ported to `cpg-cli.ps1`, whose `Read-Host` prompt has
-no completion hook to attach to).
+- the rest of the batch still runs. In the interactive shell, Tab also
+autocompletes `/command` names and group names live as you type (both
+`cpg-cli.sh` and `cpg-cli.ps1` now that neither prompt goes through
+readline/`Read-Host` any more).
 
 The interactive shell also auto-*checks* for a newer cpg-cli release on
 startup (a background `git fetch`, at most once every 24h - never blocks,

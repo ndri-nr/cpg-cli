@@ -506,6 +506,9 @@ function Invoke-Update {
     # "restart" into.
     if ($script:IsRepl) {
       Write-Host "Restarting cpg..." -ForegroundColor DarkGray
+      # The relaunch + `exit` below never unwinds Start-ReplPinned's finally block,
+      # so the scroll region has to be released by hand here.
+      Disable-PinnedRegion
       & $PSCommandPath
       exit
     }
@@ -616,24 +619,336 @@ function Test-ForUpdate {
   }
 }
 
-function Start-Repl {
-  $script:IsRepl = $true
-  try { $Host.UI.RawUI.WindowTitle = "✳  cpg-cli" } catch { }
+# --- pinned bottom input (DECSTBM scroll region + raw key loop) ------------
+#
+# Same split-pane idea as the bash side: the terminal's own scroll region
+# (DECSTBM, `ESC [ top;bot r`) is shrunk to everything ABOVE the input box, so
+# command output scrolls in the top pane while the bottom 4 rows (hint, box top,
+# input line, box bottom) never move. The terminal keeps its own scrollback - we
+# only choose where output lands (always the region's bottom margin, so content
+# rises out of the input box like a chat log).
+#
+# Read-Host can't live in here (no way to hook its line editing), so keys are read
+# one at a time with [Console]::ReadKey and cursor motion, history and completion
+# are done by hand. Start-ReplClassic stays as the fallback.
+
+$script:PinnedOn = $false
+$script:PinnedRows = 24
+$script:PinnedCols = 80
+$script:PinnedBottom = 20
+$script:PinnedReserved = 4 # hint + box top + input line + box bottom
+$script:PinnedHint = "contoh: /status, /start db, /detail, /help"
+$script:CpgHistory = @()
+$script:ReplQuit = $false
+$script:E = [char]27
+
+# Console.Out.Write, not Write-Host: no trailing newline, no host-side wrapping of
+# the escape sequences.
+function Write-Vt([string]$s) {
+  [Console]::Out.Write($s)
+}
+
+function Update-TermSize {
+  $w = 80
+  $h = 24
+  try {
+    $sz = $Host.UI.RawUI.WindowSize
+    if ($sz.Width -gt 0) { $w = $sz.Width }
+    if ($sz.Height -gt 0) { $h = $sz.Height }
+  } catch { }
+  $script:PinnedCols = $w
+  $script:PinnedRows = $h
+  $script:PinnedBottom = [Math]::Max(1, $h - $script:PinnedReserved)
+}
+
+# The scroll region is a *terminal* feature: Windows Terminal and any VT-enabled
+# host honour it, legacy conhost ignores it outright (output would scroll straight
+# over the input box), so this only turns on where VT is really available.
+# CPG_PINNED=0 is the escape hatch if some host still renders it wrong.
+function Test-PinnedSupport {
+  if ($env:CPG_PINNED -eq "0") { return $false }
+  try {
+    if ([Console]::IsInputRedirected -or [Console]::IsOutputRedirected) { return $false }
+  } catch {
+    return $false
+  }
+  $vt = $false
+  try { $vt = [bool]$Host.UI.SupportsVirtualTerminal } catch { $vt = $false }
+  if (-not $vt -and -not $env:WT_SESSION) { return $false }
+  Update-TermSize
+  return ($script:PinnedRows -ge 10 -and $script:PinnedCols -ge 24)
+}
+
+function Enable-PinnedRegion {
+  $script:PinnedOn = $true
+  # DECSTBM homes the cursor, hence the explicit move back down into the region.
+  Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H"
+}
+
+# MUST run before leaving pinned mode (the finally block, and before Invoke-Update
+# relaunches) - skip it and the user is left in a terminal that only scrolls its
+# top rows.
+function Disable-PinnedRegion {
+  if (-not $script:PinnedOn) { return }
+  $script:PinnedOn = $false
+  Write-Vt "$($script:E)[r$($script:E)[$($script:PinnedRows);1H$($script:E)[0m`r`n"
+}
+
+# Parks the cursor at the scroll region's bottom margin so whatever prints next
+# rises above the input box. Re-asserts the region first: Clear-Host, docker's
+# progress renderer or anything else that resets the margins behind our back gets
+# corrected here. The trailing newline scrolls one blank row in, which also spaces
+# each command's output apart like the old prompt's blank line did.
+function Enter-Pane {
+  Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H`r`n"
+}
+
+# Repaints the 4 pinned rows and parks the cursor inside the box. Long input scrolls
+# horizontally (the window ends at the cursor) instead of wrapping - a wrapped line
+# would grow into the border row.
+function Show-PinnedPrompt([string]$buf, [int]$pos) {
+  $e = $script:E
+  $rows = $script:PinnedRows
+  $cols = $script:PinnedCols
+  $avail = [Math]::Max(8, $cols - 6)
+  $start = 0
+  if ($pos -gt $avail) { $start = $pos - $avail }
+  $view = ""
+  if ($buf.Length -gt $start) {
+    $view = $buf.Substring($start, [Math]::Min($avail, $buf.Length - $start))
+  }
+  $hint = $script:PinnedHint
+  if ($hint.Length -gt $cols) { $hint = $hint.Substring(0, $cols) }
+  $bar = "─" * [Math]::Max(1, $cols - 2)
+  $dim = "$e[2m"
+  $accent = "$e[38;5;209m"
+  $reset = "$e[0m"
+  $out = "$e[$($rows - 3);1H$e[2K$dim$hint$reset"
+  $out += "$e[$($rows - 2);1H$e[2K$dim╭$bar╮$reset"
+  $out += "$e[$($rows - 1);1H$e[2K$dim│$reset $accent❯$reset $view"
+  $out += "$e[$($rows - 1);${cols}H$dim│$reset"
+  $out += "$e[$rows;1H$e[2K$dim╰$bar╯$reset"
+  $out += "$e[$($rows - 1);$($pos - $start + 5)H"
+  Write-Vt $out
+}
+
+# Tab-completion: /command names first, then group names once a command word is
+# typed. Returns the (possibly rewritten) line, the new cursor point, and every
+# candidate so the caller can list them when it's ambiguous.
+function Complete-CpgLine([string]$line, [int]$point) {
+  $prefix = $line.Substring(0, $point)
+  $cands = @()
+  if ($prefix -match '^/?([a-zA-Z_-]*)$') {
+    $word = $Matches[1]
+    $cands = @($Cmds | Where-Object { $_.StartsWith($word) })
+    if ($cands.Count -eq 1) {
+      $newLine = "/$($cands[0]) "
+      return @{ Line = $newLine; Point = $newLine.Length; Matches = $cands }
+    }
+  } elseif ($prefix -match '^/?([a-zA-Z_-]+)\s+([a-zA-Z_-]*)$') {
+    $word = $Matches[2]
+    $cands = @(@($SvcGroups.Keys) | Where-Object { $_.StartsWith($word) })
+    if ($cands.Count -eq 1) {
+      $newLine = $line.Substring(0, $point - $word.Length) + $cands[0]
+      return @{ Line = $newLine; Point = $newLine.Length; Matches = $cands }
+    }
+  }
+  return @{ Line = $line; Point = $point; Matches = $cands }
+}
+
+# Raw line editor: everything Read-Host gave us for free, by hand. Returns the
+# submitted line, or $null for Ctrl-C / Ctrl-D (i.e. "leave the REPL").
+function Read-PinnedLine {
+  $buf = ""
+  $pos = 0
+  $saved = ""
+  $hidx = $script:CpgHistory.Count
+  Show-PinnedPrompt $buf $pos
+  while ($true) {
+    # Idle poll instead of a straight blocking ReadKey: a resize has to be noticed
+    # while waiting at the prompt. KeyAvailable only peeks, so the keystroke is
+    # still there for ReadKey right after.
+    while (-not [Console]::KeyAvailable) {
+      Start-Sleep -Milliseconds 120
+      $pr = $script:PinnedRows
+      $pc = $script:PinnedCols
+      Update-TermSize
+      if ($pr -ne $script:PinnedRows -or $pc -ne $script:PinnedCols) {
+        Write-Vt "$($script:E)[1;$($script:PinnedBottom)r"
+        Show-PinnedPrompt $buf $pos
+      }
+    }
+    $k = [Console]::ReadKey($true)
+    $ctrl = ($k.Modifiers -band [ConsoleModifiers]::Control) -ne 0
+    switch ($k.Key) {
+      "Enter" { return $buf }
+      "Backspace" {
+        if ($pos -gt 0) {
+          $buf = $buf.Remove($pos - 1, 1)
+          $pos--
+        }
+      }
+      "Delete" {
+        if ($pos -lt $buf.Length) { $buf = $buf.Remove($pos, 1) }
+      }
+      "LeftArrow" { if ($pos -gt 0) { $pos-- } }
+      "RightArrow" { if ($pos -lt $buf.Length) { $pos++ } }
+      "Home" { $pos = 0 }
+      "End" { $pos = $buf.Length }
+      "UpArrow" {
+        if ($hidx -gt 0) {
+          if ($hidx -eq $script:CpgHistory.Count) { $saved = $buf }
+          $hidx--
+          $buf = $script:CpgHistory[$hidx]
+          $pos = $buf.Length
+        }
+      }
+      "DownArrow" {
+        if ($hidx -lt $script:CpgHistory.Count) {
+          $hidx++
+          if ($hidx -eq $script:CpgHistory.Count) {
+            $buf = $saved
+          } else {
+            $buf = $script:CpgHistory[$hidx]
+          }
+          $pos = $buf.Length
+        }
+      }
+      "Escape" {
+        $buf = ""
+        $pos = 0
+      }
+      "Tab" {
+        $r = Complete-CpgLine $buf $pos
+        $buf = $r.Line
+        $pos = $r.Point
+        if ($r.Matches.Count -gt 1) {
+          Enter-Pane
+          Write-Host ("  " + ($r.Matches -join " ")) -ForegroundColor DarkGray
+        }
+      }
+      default {
+        if ($ctrl) {
+          switch ($k.Key) {
+            "C" { return $null }
+            "D" { if (-not $buf) { return $null } }
+            "A" { $pos = 0 }
+            "E" { $pos = $buf.Length }
+            "U" {
+              $buf = $buf.Substring($pos)
+              $pos = 0
+            }
+            "K" { $buf = $buf.Substring(0, $pos) }
+            "L" { Write-Vt "$($script:E)[1;$($script:PinnedBottom)J" }
+          }
+        } elseif ($k.KeyChar -ne [char]0 -and -not [Char]::IsControl($k.KeyChar)) {
+          $buf = $buf.Insert($pos, $k.KeyChar)
+          $pos++
+        }
+      }
+    }
+    Show-PinnedPrompt $buf $pos
+  }
+}
+
+# --- REPL bodies -----------------------------------------------------------
+
+function Show-Intro {
   Show-Banner
   Test-ForUpdate
   Write-Host ""
   Show-Status ""
+}
+
+# One typed line -> one command. Shared by both prompts. Sets $script:ReplQuit when
+# the line means "leave the REPL" - a flag rather than a return value, because any
+# stray pipeline output from the commands it dispatches would ride along with a
+# returned $true/$false and break the caller's test.
+function Invoke-ReplLine([string]$line) {
+  $line = $line.TrimStart("/")
+  if (-not $line.Trim()) { return }
+  $parts = $line -split '\s+', 2
+  $subCmd = $parts[0]
+  $subArg = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+  # start/stop/restart can take several groups at once (e.g. `/start db ai messaging`).
+  $subArgs = @($subArg -split '\s+' | Where-Object { $_ })
+
+  if ($subCmd -in @("exit", "quit", "q")) {
+    $script:ReplQuit = $true
+    return
+  }
+  if ($subCmd -in @("-h", "--help", "help")) {
+    Show-Help
+    return
+  }
+  if ($subCmd -in @("clear", "cls")) {
+    Clear-Host
+    Show-Banner
+    Write-Host ""
+    Show-Status ""
+    return
+  }
+
+  $resolved = Resolve-Choice $subCmd $CmdAlias $Cmds
+  if (-not $resolved) {
+    Write-Host "  (/help buat liat semua command)" -ForegroundColor DarkGray
+    return
+  }
+  switch ($resolved) {
+    "status" { Show-Status $subArg }
+    "start" { Invoke-Start $subArgs }
+    "stop" { Invoke-Stop $subArgs }
+    "restart" { Invoke-Restart $subArgs }
+    "detail" { Show-Detail $subArg }
+    "update" { Invoke-Update }
+    "uninstall" { Invoke-Uninstall }
+  }
+}
+
+function Start-ReplPinned {
+  Update-TermSize
+  $prevCtrlC = $false
+  try { $prevCtrlC = [Console]::TreatControlCAsInput } catch { }
+  try {
+    # Ctrl-C as a *signal* could kill the process mid-region and leave the terminal
+    # only scrolling its top rows; as input it's just another key to handle.
+    try { [Console]::TreatControlCAsInput = $true } catch { }
+    Write-Vt "$($script:E)[2J$($script:E)[H" # start clean so nothing straddles the box
+    Enable-PinnedRegion
+    Enter-Pane
+    Show-Intro
+    while ($true) {
+      $line = Read-PinnedLine
+      if ($null -eq $line) { break }
+      if (-not $line.Trim()) { continue }
+      $script:CpgHistory += $line
+      # Echo the submitted line into the output pane, so the scrollback reads like a
+      # shell session (the input box itself is cleared for the next command).
+      Enter-Pane
+      Write-Host -NoNewline "❯ " -ForegroundColor DarkYellow
+      Write-Host $line
+      Invoke-ReplLine $line
+      if ($script:ReplQuit) { break }
+    }
+  } finally {
+    Disable-PinnedRegion
+    try { [Console]::TreatControlCAsInput = $prevCtrlC } catch { }
+  }
+  Write-Host "Bye."
+}
+
+# Fallback prompt for hosts that can't take the pinned box: the box is redrawn per
+# turn instead of staying put, and Read-Host does the line editing.
+function Start-ReplClassic {
+  Show-Intro
   while ($true) {
     Write-Host ""
     # A framed input area, like Claude Code's own prompt box - both borders are
     # actually drawn (with a blank line reserved between them) BEFORE Read-Host
     # starts, then the console cursor is walked back up onto that blank line.
     # Read-Host only ever redraws its own current line, so the borders above and
-    # below stay put while typing - no raw-mode console-reading loop needed for that
-    # part. No inline vanish-on-type placeholder though - Read-Host has no hook to
-    # draw one that disappears the moment you type. The hint line above is the safe
-    # equivalent.
-    Write-Host "contoh: /status, /start db, /detail, /help" -ForegroundColor DarkGray
+    # below stay put while typing.
+    Write-Host $script:PinnedHint -ForegroundColor DarkGray
     Write-Host (Get-Hr) -ForegroundColor DarkGray
     Write-Host ""
     Write-Host (Get-Hr) -ForegroundColor DarkGray
@@ -646,40 +961,20 @@ function Start-Repl {
     Wait-KeyOrResize
     $line = Read-Host
     if ($null -eq $line) { break }
-    $line = $line.TrimStart("/")
-    if (-not $line.Trim()) { continue }
-    $parts = $line -split '\s+', 2
-    $subCmd = $parts[0]
-    $subArg = if ($parts.Count -gt 1) { $parts[1] } else { "" }
-    # start/stop/restart can take several groups at once (e.g. `/start db ai messaging`).
-    $subArgs = @($subArg -split '\s+' | Where-Object { $_ })
-
-    if ($subCmd -in @("exit", "quit", "q")) { break }
-    if ($subCmd -in @("-h", "--help", "help")) { Show-Help; continue }
-    if ($subCmd -in @("clear", "cls")) {
-      Clear-Host
-      Show-Banner
-      Write-Host ""
-      Show-Status ""
-      continue
-    }
-
-    $resolved = Resolve-Choice $subCmd $CmdAlias $Cmds
-    if (-not $resolved) {
-      Write-Host "  (/help buat liat semua command)" -ForegroundColor DarkGray
-      continue
-    }
-    switch ($resolved) {
-      "status" { Show-Status $subArg }
-      "start" { Invoke-Start $subArgs }
-      "stop" { Invoke-Stop $subArgs }
-      "restart" { Invoke-Restart $subArgs }
-      "detail" { Show-Detail $subArg }
-      "update" { Invoke-Update }
-      "uninstall" { Invoke-Uninstall }
-    }
+    Invoke-ReplLine $line
+    if ($script:ReplQuit) { break }
   }
   Write-Host "Bye."
+}
+
+function Start-Repl {
+  $script:IsRepl = $true
+  try { $Host.UI.RawUI.WindowTitle = "✳  cpg-cli" } catch { }
+  if (Test-PinnedSupport) {
+    Start-ReplPinned
+  } else {
+    Start-ReplClassic
+  }
 }
 
 # --- entry ---------------------------------------------------------------

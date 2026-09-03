@@ -92,7 +92,35 @@ beneran (proyek terpisah, versi "cpg v2" mungkin), dan biarin REPL sekarang
    ke REPL mode sekarang (boxed per-turn) — jangan biarin user stuck di
    layar rusak.
 
-## Status
-Belum ada baris kode ditulis buat ini. WINCH-trap-border (fitur lama, lebih
-kecil) juga masih pending nempel di `repl()` — itu independen, bisa jalan
-duluan/terpisah dari plan ini kalau mau progress kecil dulu.
+## Status: DONE (shipped)
+
+Opsi 2+1 (raw keystroke loop + DECSTBM scroll region) yang dipilih, tetep pure
+bash/ps1, no runtime tambahan. Yang beneran ke-implement:
+
+- `cpg-cli.sh`: `repl_pinned()` (scroll region + `read -rsn1` line editor) dengan
+  `repl_classic()` sebagai fallback, dispatch di `repl()`. Input box digambar
+  bener-bener kotak (`╭─╮ │ ❯ … │ ╰─╯`) di 4 baris paling bawah, output selalu
+  jatuh di bottom margin scroll region jadi naik ke atas kayak chat log.
+- `cpg-cli.ps1`: mirror-nya - `Start-ReplPinned` / `Read-PinnedLine` /
+  `Show-PinnedPrompt` pakai VT sequences + `[Console]::ReadKey`, fallback ke
+  `Start-ReplClassic`. Tab-completion sekarang ada di PS juga (dulu gak ada).
+- Keys: left/right, Home/End, Backspace/Delete, history up/down, Tab, Ctrl-A/E/U/K,
+  Ctrl-L (wipe pane atas doang), Ctrl-C / Ctrl-D keluar.
+- Resize live: idle-poll ukuran terminal tiap ~1s (plus SIGWINCH trap di bash),
+  re-cut region + repaint box di posisi baru. Gak nunggu Enter lagi.
+- Restore scroll region: EXIT trap (bash) / `finally` (PS), plus manual sebelum
+  `exec`/relaunch-nya `update`. PS juga set `TreatControlCAsInput` biar Ctrl-C gak
+  bunuh proses di tengah region.
+- Fallback: non-tty, window < 10x24, host tanpa VT (conhost lama), atau
+  `CPG_PINNED=0` -> balik ke boxed per-turn prompt yang lama.
+- Bonus bug ketangkep waktu ngerjain ini: `tput cols 2>/dev/null` di macOS nanya
+  ukuran ke *stderr*, jadi begitu stderr di-redirect dia balikin default terminfo
+  (80 kolom) - semua divider selalu 80 walau terminal lebih lebar. Sekarang ukuran
+  diambil dari `stty size` (`_cpg_term_size`, dipake `hr` + `print_status` juga).
+- `cpg-cli.sh` sekarang nolak bash < 4 dengan pesan jelas (dulu mati dengan
+  "database: unbound variable" di /bin/bash-nya macOS).
+
+Diuji dengan pty + emulator terminal (pyte): bash 5.3 dan PowerShell 7.4 di macOS -
+layout, tab, history, resize 24x80 -> 30x100, exit + restore region semua bener.
+Yang BELUM diuji dan masih perlu dicoba manual: Git Bash / WSL, Windows Terminal,
+conhost lama, xterm asli di Linux.
