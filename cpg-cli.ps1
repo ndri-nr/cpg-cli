@@ -9,15 +9,15 @@
   an unrecognized-but-close typo it asks "did you mean X?" instead of just failing.
 
 .EXAMPLE
-  ./docker-group.ps1                  interactive menu (asks start or stop, then group)
-  ./docker-group.ps1 status           show every group + running/total count
-  ./docker-group.ps1 status cache     show just that group's status
-  ./docker-group.ps1 start            pick from groups that aren't fully up
-  ./docker-group.ps1 start db         start a specific group (alias for database)
-  ./docker-group.ps1 stop             pick from groups that have something running
-  ./docker-group.ps1 stop rabbit
-  ./docker-group.ps1 restart [group]
-  ./docker-group.ps1 help
+  ./cpg-cli.ps1                  interactive menu (asks start or stop, then group)
+  ./cpg-cli.ps1 status           show every group + running/total count
+  ./cpg-cli.ps1 status cache     show just that group's status
+  ./cpg-cli.ps1 start            pick from groups that aren't fully up
+  ./cpg-cli.ps1 start db         start a specific group (alias for database)
+  ./cpg-cli.ps1 stop             pick from groups that have something running
+  ./cpg-cli.ps1 stop rabbit
+  ./cpg-cli.ps1 restart [group]
+  ./cpg-cli.ps1 help
 #>
 param(
   [Parameter(Position = 0)]
@@ -39,7 +39,7 @@ $GroupFile = @{
 }
 
 $SvcGroups = [ordered]@{
-  database      = @("postgres", "postgres-replica-1", "postgres-replica-2", "pgpool", "timescaledb", "mongodb", "mongo-express")
+  database      = @("postgres", "postgres-replica-1", "postgres-replica-2", "pgpool", "timescaledb", "mongo-primary", "mongo-replica-1", "mongo-replica-2", "mongo-cluster-init", "mongo-express")
   cache         = @("redis", "redis-insight", "redis-cluster-1", "redis-cluster-2", "redis-cluster-3", "redis-cluster-4", "redis-cluster-5", "redis-cluster-6", "redis-cluster-init")
   messaging     = @("rabbitmq")
   observability = @("otel-collector", "tempo", "prometheus", "grafana")
@@ -189,12 +189,12 @@ project compose terpisah (compose/<grup>.yml) - keliatan sbg baris sendiri2 di
 'docker compose ls' / Docker Desktop.
 
 Usage:
-  ./docker-group.ps1                    masuk interactive shell (prompt cpg>, ketik /status /start dst berulang)
-  ./docker-group.ps1 status [grup]      liat status (semua grup, atau 1 grup doang)
-  ./docker-group.ps1 start  [grup]      nyalain grup (tanpa nama -> pilih dari yg belum full up)
-  ./docker-group.ps1 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
-  ./docker-group.ps1 restart [grup]
-  ./docker-group.ps1 detail [grup]      connection info (host/port/user/pass/URI) per service
+  ./cpg-cli.ps1                    masuk interactive shell (prompt cpg>, ketik /status /start dst berulang)
+  ./cpg-cli.ps1 status [grup]      liat status (semua grup, atau 1 grup doang)
+  ./cpg-cli.ps1 start  [grup]      nyalain grup (tanpa nama -> pilih dari yg belum full up)
+  ./cpg-cli.ps1 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
+  ./cpg-cli.ps1 restart [grup]
+  ./cpg-cli.ps1 detail [grup]      connection info (host/port/user/pass/URI) per service
 
 Grup: $($SvcGroups.Keys -join ', ')
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
@@ -314,13 +314,18 @@ timescaledb
   host: localhost   port: 6543   user: admin   pass: password   db: sample
   psql:  psql -h localhost -p 6543 -U admin -d sample
 
-mongodb
+mongo-primary  (always on, doubles as replica set primary)
   host: localhost   port: 27017   user: admin   pass: password   db: sample (authSource=admin)
   uri:   mongodb://admin:password@localhost:27017/sample?authSource=admin
 
-mongo-express  (web UI for mongodb)
+mongo-replica-1 / mongo-replica-2  (profile: mongo-cluster)
+  host: localhost   port: 27019 / 27020   user: admin   pass: password (inherited from primary)
+  full replica set uri:
+    mongodb://admin:password@localhost:27017,localhost:27019,localhost:27020/sample?replicaSet=rs0&authSource=admin
+
+mongo-express  (web UI for mongo-primary)
   url: http://localhost:8888
-  basic auth login: admin / admin   <- NOT the same as mongodb's creds above
+  basic auth login: admin / admin   <- NOT the same as mongo's creds above
 "@
     }
     "cache" {

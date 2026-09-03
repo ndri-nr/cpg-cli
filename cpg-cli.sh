@@ -8,14 +8,14 @@
 # an unrecognized-but-close typo it asks "did you mean X?" instead of just failing.
 #
 # Usage:
-#   ./docker-group.sh                 interactive menu (asks start or stop, then group)
-#   ./docker-group.sh status          show every group + running/total count
-#   ./docker-group.sh status [group]  show just that group's status
-#   ./docker-group.sh start [group]   start a group (no group = pick from what's not fully up)
-#   ./docker-group.sh stop  [group]   stop a group  (no group = pick from what's running)
-#   ./docker-group.sh restart [group]
-#   ./docker-group.sh detail [group]  connection info (host/port/user/pass/URI) per service
-#   ./docker-group.sh help
+#   ./cpg-cli.sh                 interactive menu (asks start or stop, then group)
+#   ./cpg-cli.sh status          show every group + running/total count
+#   ./cpg-cli.sh status [group]  show just that group's status
+#   ./cpg-cli.sh start [group]   start a group (no group = pick from what's not fully up)
+#   ./cpg-cli.sh stop  [group]   stop a group  (no group = pick from what's running)
+#   ./cpg-cli.sh restart [group]
+#   ./cpg-cli.sh detail [group]  connection info (host/port/user/pass/URI) per service
+#   ./cpg-cli.sh help
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -32,7 +32,7 @@ declare -A GROUP_FILE=(
 # group -> its services (space-separated). Only used for status/start/stop lists -
 # `compose ps`/`start`/`stop` with no service args already means "every service in the file".
 declare -A SVC_GROUPS=(
-  [database]="postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongodb mongo-express"
+  [database]="postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongo-primary mongo-replica-1 mongo-replica-2 mongo-cluster-init mongo-express"
   [cache]="redis redis-insight redis-cluster-1 redis-cluster-2 redis-cluster-3 redis-cluster-4 redis-cluster-5 redis-cluster-6 redis-cluster-init"
   [messaging]="rabbitmq"
   [observability]="otel-collector tempo prometheus grafana"
@@ -358,13 +358,18 @@ timescaledb
   host: localhost   port: 6543   user: admin   pass: password   db: sample
   psql:  psql -h localhost -p 6543 -U admin -d sample
 
-mongodb
+mongo-primary  (always on, doubles as replica set primary)
   host: localhost   port: 27017   user: admin   pass: password   db: sample (authSource=admin)
   uri:   mongodb://admin:password@localhost:27017/sample?authSource=admin
 
-mongo-express  (web UI for mongodb)
+mongo-replica-1 / mongo-replica-2  (profile: mongo-cluster)
+  host: localhost   port: 27019 / 27020   user: admin   pass: password (inherited from primary)
+  full replica set uri:
+    mongodb://admin:password@localhost:27017,localhost:27019,localhost:27020/sample?replicaSet=rs0&authSource=admin
+
+mongo-express  (web UI for mongo-primary)
   url: http://localhost:8888
-  basic auth login: admin / admin   <- NOT the same as mongodb's creds above
+  basic auth login: admin / admin   <- NOT the same as mongo's creds above
 EOF
       ;;
     cache)

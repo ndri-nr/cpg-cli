@@ -17,18 +17,18 @@ $InstallDir = Join-Path $HOME ".local\bin"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 # --- cmd.exe / PowerShell wrapper ---
-$cmdWrapper = "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"$RepoRoot\docker-group.ps1`" %*`r`n"
+$cmdWrapper = "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"$RepoRoot\cpg-cli.ps1`" %*`r`n"
 Set-Content -Path (Join-Path $InstallDir "cpg.cmd") -Value $cmdWrapper -Encoding ascii -NoNewline
 
 # --- Git Bash wrapper (forward slashes, LF line ending) ---
 $repoRootUnix = $RepoRoot -replace '\\', '/'
-$bashWrapper = "#!/usr/bin/env bash`nexec `"$repoRootUnix/docker-group.sh`" `"`$@`"`n"
+$bashWrapper = "#!/usr/bin/env bash`nexec `"$repoRootUnix/cpg-cli.sh`" `"`$@`"`n"
 $bashPath = Join-Path $InstallDir "cpg"
 [System.IO.File]::WriteAllText($bashPath, ($bashWrapper -replace "`r`n", "`n"))
 
 Write-Host "Installed:"
-Write-Host "  $InstallDir\cpg.cmd -> $RepoRoot\docker-group.ps1  (PowerShell/cmd)"
-Write-Host "  $InstallDir\cpg     -> $RepoRoot\docker-group.sh   (Git Bash)"
+Write-Host "  $InstallDir\cpg.cmd -> $RepoRoot\cpg-cli.ps1  (PowerShell/cmd)"
+Write-Host "  $InstallDir\cpg     -> $RepoRoot\cpg-cli.sh   (Git Bash)"
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$InstallDir*") {

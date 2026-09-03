@@ -1,4 +1,4 @@
-# compose-playground
+# cpg-cli
 
 A local dev "everything box" - Postgres (with real primary/replica streaming
 replication + round-robin read routing), Redis (single-node and a real 6-node
@@ -16,17 +16,17 @@ segmentation) against the real thing locally, instead of mocking them.
 
 Gives you a `cpg` command usable from **any directory, any shell**. No
 `git clone` needed first - the one-liner does that for you (into
-`~/compose-playground` by default; override with `$COMPOSE_PLAYGROUND_DIR` /
-`$env:COMPOSE_PLAYGROUND_DIR` before running it).
+`~/cpg-cli` by default; override with `$CPG_CLI_DIR` /
+`$env:CPG_CLI_DIR` before running it).
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/ndri-nr/compose-playground/main/install-remote.ps1 | iex
+irm https://raw.githubusercontent.com/ndri-nr/cpg-cli/main/install-remote.ps1 | iex
 ```
 
 **Git Bash / Linux / macOS:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ndri-nr/compose-playground/main/install-remote.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ndri-nr/cpg-cli/main/install-remote.sh | bash
 ```
 
 Already have the repo cloned? Just run `./install.sh` (or `./install.ps1`)
@@ -41,7 +41,7 @@ cpg
 
 Uninstalling: delete `cpg` / `cpg.cmd` from `~/.local/bin` (remove that folder
 from PATH if you added it just for this), then remove the cloned folder
-(`~/compose-playground` by default).
+(`~/cpg-cli` by default).
 
 ## The `cpg` CLI
 
@@ -52,7 +52,7 @@ $ cpg
 cpg interactive shell. /help buat commands, /exit buat keluar.
 
 GROUP            STATUS
-database         [7/7 running]  postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongodb mongo-express
+database         [9/10 running]  postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongo-primary mongo-replica-1 mongo-replica-2 mongo-cluster-init mongo-express
 cache            [8/9 running]  redis redis-insight redis-cluster-1 ...
 ...
 
@@ -84,15 +84,16 @@ unique prefixes (`obs` -> `observability`), and asks "did you mean X?" on a
 close typo instead of just failing.
 
 If you didn't install it globally, run it straight from the repo instead:
-`./docker-group.sh ...` or `./docker-group.ps1 ...`.
+`./cpg-cli.sh ...` or `./cpg-cli.ps1 ...`.
 
 ## Quick start (without `cpg`)
 
 Each group is a separate compose file/project:
 
 ```bash
-docker compose -f compose/database.yml up -d                        # postgres, timescaledb, mongodb
-docker compose -f compose/database.yml --profile postgres-replica up -d  # + 2 replicas + pgpool
+docker compose -f compose/database.yml up -d                        # postgres, timescaledb, mongo-primary
+docker compose -f compose/database.yml --profile postgres-replica up -d  # + 2 postgres replicas + pgpool
+docker compose -f compose/database.yml --profile mongo-cluster up -d     # + 2 mongo replicas (replica set)
 docker compose -f compose/cache.yml up -d                            # redis
 docker compose -f compose/cache.yml --profile redis-cluster up -d    # + 6-node Redis Cluster
 docker compose -f compose/messaging.yml up -d
@@ -138,14 +139,18 @@ flowchart LR
         replica2[postgres-replica-2<br/>:5444]
         pgpool[pgpool<br/>:5433]
         timescaledb[timescaledb<br/>:6543]
-        mongodb[mongodb<br/>:27017]
+        mongoprimary[mongo-primary<br/>:27017]
+        mongoreplica1["mongo-replica-1<br/>:27019 (profile)"]
+        mongoreplica2["mongo-replica-2<br/>:27020 (profile)"]
         mongoexpress[mongo-express<br/>:8888]
         postgres -. streams .-> replica1
         postgres -. streams .-> replica2
         pgpool --> postgres
         pgpool --> replica1
         pgpool --> replica2
-        mongoexpress --> mongodb
+        mongoprimary -. "initial sync" .-> mongoreplica1
+        mongoprimary -. "initial sync" .-> mongoreplica2
+        mongoexpress --> mongoprimary
     end
 
     subgraph cache ["cpg-cache (project + network)"]
@@ -185,7 +190,9 @@ flowchart LR
 | Database | `postgres-replica-1/2` | 5443 / 5444 | `--profile postgres-replica`. Auto-clone via `pg_basebackup`. |
 | Database | `pgpool` | 5433 | `--profile postgres-replica`. Round-robin read routing across the replicas; writes go to master. |
 | Database | `timescaledb` | 6543 | |
-| Database | `mongodb` / `mongo-express` | 27017 / 8888 | |
+| Database | `mongo-primary` | 27017 | Always on. Doubles as the replica set primary. |
+| Database | `mongo-replica-1/2` | 27019 / 27020 | `--profile mongo-cluster`. Initial-sync from primary. |
+| Database | `mongo-express` | 8888 | Web UI for `mongo-primary`. |
 | Cache | `redis` | 6379 | Single-node. |
 | Cache | `redis-cluster-1..6` | 7000-7005 | `--profile redis-cluster`. Real 3 masters + 3 replicas. |
 | Cache | `redis-insight` | 5540 | Redis GUI. |
@@ -205,7 +212,7 @@ anything beyond your own machine.
 ## Folder layout
 
 ```
-compose-playground/
+cpg-cli/
 ├── compose/                    # one compose project per group
 │   ├── database.yml
 │   ├── cache.yml
@@ -213,9 +220,11 @@ compose-playground/
 │   ├── observability.yml
 │   ├── quality.yml
 │   └── ai.yml                  # chromadb - external-attaches to database + cache
-├── docker-group.sh / .ps1      # the cpg CLI implementation
+├── cpg-cli.sh / .ps1           # the cpg CLI implementation
 ├── install.sh / .ps1           # installs `cpg` globally
+├── install-remote.sh / .ps1    # one-liner installer (clones + installs)
 ├── postgres/                   # pg_hba.conf + replica bootstrap script
+├── mongo/                      # internal-auth keyfile + entrypoint wrapper
 └── observability/              # otel-collector / tempo / prometheus configs
 ```
 
@@ -240,6 +249,13 @@ compose-playground/
 - **`repl_user` creation is manual** (see Quick start) since the master's
   volume was already initialized before replication was added - the usual
   `/docker-entrypoint-initdb.d` trick only runs on an empty volume.
+- **MongoDB requires `--keyFile` once `--replSet` and auth are both active** -
+  `mongod` refuses to start otherwise (`BadValue: security.keyFile is required
+  when authorization is enabled with replica sets`). The keyfile also has
+  strict permission requirements (not group/world-readable) that a Windows
+  bind-mount can't preserve directly - `mongo/mongo-entrypoint.sh` copies it
+  into the container and fixes ownership/permissions before starting `mongod`,
+  same trick as `postgres/replica-entrypoint.sh`.
 
 ## License
 

@@ -115,26 +115,42 @@ services:
       - timescaledb-data:/data/timescaledb
     restart: unless-stopped
 
-  mongodb:
+  # Doubles as the replica set primary for mongo-replica-1/2 below - always on, no
+  # separate "primary" container to start/stop, same reuse pattern as `postgres`
+  # above. Keeps its existing MONGO_INITDB_ROOT_* auth - the replica set members
+  # inherit the same admin user automatically via initial sync once they join, no
+  # separate keyFile/credentials needed for them.
+  mongo-primary:
     image: mongo:latest
-    container_name: mongodb
+    container_name: mongo-primary
     environment:
       MONGO_INITDB_DATABASE: sample
       MONGO_INITDB_ROOT_USERNAME: admin
       MONGO_INITDB_ROOT_PASSWORD: password
+    entrypoint: ["sh", "/scripts/mongo-entrypoint.sh"]
+    command: ["mongod", "--replSet", "rs0", "--keyFile", "/etc/mongo-keyfile", "--bind_ip_all"]
     ports:
       - "27017:27017"
+      - "27019:27019"
+      - "27020:27020"
     volumes:
       - mongodb_data:/data/db
+      - ../mongo/mongo-keyfile:/keyfile-src/mongo-keyfile:ro
+      - ../mongo/mongo-entrypoint.sh:/scripts/mongo-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   mongo-express:
     image: mongo-express:latest
     container_name: mongo-express
     depends_on:
-      - mongodb
+      - mongo-primary
     environment:
-      ME_CONFIG_MONGODB_SERVER: mongodb
+      ME_CONFIG_MONGODB_SERVER: mongo-primary
       ME_CONFIG_MONGODB_ADMINUSERNAME: admin
       ME_CONFIG_MONGODB_ADMINPASSWORD: password
       ME_CONFIG_BASICAUTH_USERNAME: admin
@@ -142,6 +158,88 @@ services:
     ports:
       - "8888:8081"
     restart: unless-stopped
+
+  # Replicas (2x) - off by default, start only when needed:
+  #   docker compose -f compose/database.yml --profile mongo-cluster up -d
+  # Fresh/empty - join the replica set and initial-sync their data from mongo-primary,
+  # same idea as postgres-replica-1/2's pg_basebackup above (just automatic here,
+  # MongoDB does initial sync itself once added to the replica set - no custom
+  # entrypoint script needed).
+  #
+  # Same loopback trick as redis-cluster/postgres above: both attach to
+  # mongo-primary's network namespace (`network_mode: service:mongo-primary`) instead
+  # of the default network, each on a distinct port (27019/27020 - mongo-primary
+  # already publishes those, see above), and the replica set config lists members as
+  # 127.0.0.1:<port> - reachable identically from inside any container and from the
+  # Windows host.
+  mongo-replica-1:
+    image: mongo:latest
+    container_name: mongo-replica-1
+    profiles: ["mongo-cluster"]
+    network_mode: "service:mongo-primary"
+    depends_on:
+      - mongo-primary
+    entrypoint: ["sh", "/scripts/mongo-entrypoint.sh"]
+    command: ["mongod", "--replSet", "rs0", "--port", "27019", "--keyFile", "/etc/mongo-keyfile", "--bind_ip_all"]
+    volumes:
+      - mongodb_replica_1_data:/data/db
+      - ../mongo/mongo-keyfile:/keyfile-src/mongo-keyfile:ro
+      - ../mongo/mongo-entrypoint.sh:/scripts/mongo-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27019", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mongo-replica-2:
+    image: mongo:latest
+    container_name: mongo-replica-2
+    profiles: ["mongo-cluster"]
+    network_mode: "service:mongo-primary"
+    depends_on:
+      - mongo-primary
+    entrypoint: ["sh", "/scripts/mongo-entrypoint.sh"]
+    command: ["mongod", "--replSet", "rs0", "--port", "27020", "--keyFile", "/etc/mongo-keyfile", "--bind_ip_all"]
+    volumes:
+      - mongodb_replica_2_data:/data/db
+      - ../mongo/mongo-keyfile:/keyfile-src/mongo-keyfile:ro
+      - ../mongo/mongo-entrypoint.sh:/scripts/mongo-entrypoint.sh:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27020", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot bootstrap: initiates the replica set with mongo-primary as member 0 (it
+  # keeps its existing data/becomes PRIMARY; the two replicas initial-sync from it).
+  # Safe to re-run (`up -d` again) - if already initiated, rs.initiate() fails
+  # harmlessly and the `|| echo` keeps this container exiting 0.
+  mongo-cluster-init:
+    image: mongo:latest
+    container_name: mongo-cluster-init
+    profiles: ["mongo-cluster"]
+    network_mode: "service:mongo-primary"
+    depends_on:
+      mongo-primary:
+        condition: service_healthy
+      mongo-replica-1:
+        condition: service_healthy
+      mongo-replica-2:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - >
+        mongosh -u admin -p password --authenticationDatabase admin --eval
+        'rs.initiate({_id: "rs0", members: [
+          {_id: 0, host: "127.0.0.1:27017"},
+          {_id: 1, host: "127.0.0.1:27019"},
+          {_id: 2, host: "127.0.0.1:27020"}
+        ]})'
+        || echo "Replica set already initialized, skipping."
+    restart: "no"
 
 # Named "cpg-database" (not the project-default auto name) so compose/ai.yml can attach
 # chromadb to it as an `external: true` network - see compose/ai.yml for why.
@@ -163,3 +261,7 @@ volumes:
     name: cpg_timescaledb-data
   mongodb_data:
     name: cpg_mongodb_data
+  mongodb_replica_1_data:
+    name: cpg_mongodb_replica_1_data
+  mongodb_replica_2_data:
+    name: cpg_mongodb_replica_2_data

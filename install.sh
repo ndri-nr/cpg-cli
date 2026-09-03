@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs the `cpg` command globally (works from any directory) by dropping a thin
-# wrapper into ~/.local/bin that always points back at this repo's docker-group.sh -
+# wrapper into ~/.local/bin that always points back at this repo's cpg-cli.sh -
 # for Git Bash / Linux / macOS. Windows PowerShell/cmd users: run install.ps1 instead.
 set -euo pipefail
 
@@ -10,11 +10,11 @@ mkdir -p "$INSTALL_DIR"
 
 cat > "$INSTALL_DIR/cpg" <<EOF
 #!/usr/bin/env bash
-exec "$REPO_ROOT/docker-group.sh" "\$@"
+exec "$REPO_ROOT/cpg-cli.sh" "\$@"
 EOF
 chmod +x "$INSTALL_DIR/cpg"
 
-echo "Installed: $INSTALL_DIR/cpg -> $REPO_ROOT/docker-group.sh"
+echo "Installed: $INSTALL_DIR/cpg -> $REPO_ROOT/cpg-cli.sh"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*)

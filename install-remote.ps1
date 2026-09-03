@@ -1,15 +1,15 @@
 <#
 .SYNOPSIS
   One-liner installer - no `git clone` needed first:
-    irm https://raw.githubusercontent.com/ndri-nr/compose-playground/main/install-remote.ps1 | iex
+    irm https://raw.githubusercontent.com/ndri-nr/cpg-cli/main/install-remote.ps1 | iex
 
-  Clones the repo (or pulls latest if already cloned) into $env:COMPOSE_PLAYGROUND_DIR
-  (default ~/compose-playground), then runs its install.ps1 to wire up `cpg`.
+  Clones the repo (or pulls latest if already cloned) into $env:CPG_CLI_DIR
+  (default ~/cpg-cli), then runs its install.ps1 to wire up `cpg`.
 #>
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = "https://github.com/ndri-nr/compose-playground.git"
-$TargetDir = if ($env:COMPOSE_PLAYGROUND_DIR) { $env:COMPOSE_PLAYGROUND_DIR } else { Join-Path $HOME "compose-playground" }
+$RepoUrl = "https://github.com/ndri-nr/cpg-cli.git"
+$TargetDir = if ($env:CPG_CLI_DIR) { $env:CPG_CLI_DIR } else { Join-Path $HOME "cpg-cli" }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
   Write-Host "git is required but not found on PATH. Install git first."

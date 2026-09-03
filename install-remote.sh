@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # One-liner installer - no `git clone` needed first:
-#   curl -fsSL https://raw.githubusercontent.com/ndri-nr/compose-playground/main/install-remote.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ndri-nr/cpg-cli/main/install-remote.sh | bash
 #
-# Clones the repo (or pulls latest if already cloned) into $COMPOSE_PLAYGROUND_DIR
-# (default ~/compose-playground), then runs its install.sh to wire up `cpg`.
+# Clones the repo (or pulls latest if already cloned) into $CPG_CLI_DIR
+# (default ~/cpg-cli), then runs its install.sh to wire up `cpg`.
 set -euo pipefail
 
-REPO_URL="https://github.com/ndri-nr/compose-playground.git"
-TARGET_DIR="${COMPOSE_PLAYGROUND_DIR:-$HOME/compose-playground}"
+REPO_URL="https://github.com/ndri-nr/cpg-cli.git"
+TARGET_DIR="${CPG_CLI_DIR:-$HOME/cpg-cli}"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required but not found on PATH. Install git first." >&2
