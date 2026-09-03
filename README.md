@@ -82,7 +82,7 @@ cpg start [group...]   # no group -> pick from what's not fully up yet; takes se
 cpg stop  [group...]   # no group -> pick from what's actually running; same multi-group support
 cpg restart [group...]
 cpg detail [group]     # connection info per service: host/port/user/pass/URI
-cpg update             # git pull cpg-cli itself + refresh the cpg wrapper
+cpg update             # git pull cpg-cli itself + refresh the cpg wrapper (auto-restarts the shell if run from inside it)
 cpg uninstall          # remove the cpg command (repo/containers/data untouched)
 cpg clear              # clear the terminal (in the shell: redraws the banner+status too)
 cpg help
