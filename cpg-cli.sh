@@ -375,6 +375,9 @@ Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
 Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
+Scroll (wheel / PgUp-PgDn) geser area output doang - kotak input tetep di bawah.
+End atau langsung ngetik = balik ke output terbaru. CPG_ALTSCREEN=0 kalo mau
+balik ke layar normal (scroll-nya jadi geser window kayak biasa).
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -711,6 +714,7 @@ do_update() {
     # `exec` never runs the EXIT trap, so the scroll region has to be released by
     # hand here or the replacement process inherits a half-scrolling terminal.
     _cpg_region_off
+    _cpg_alt_off
     exec bash "$0"
   fi
 }
@@ -849,6 +853,8 @@ _CPG_HIST=(); _CPG_CL=""; _CPG_CP=0; _CPG_CMATCH=()
 _CPG_WINCH=0
 _CPG_HINT="contoh: /status, /start db, /detail, /help"
 _CPG_LOG="" # mirror of everything printed into the pane, so a resize can repaint it
+_CPG_ALT=0 # 1 while the alternate screen is in use (own scrollback, fixed box)
+_CPG_SCROLL=0 # how many lines the pane is scrolled up from the newest output
 
 # Single source of truth for the terminal's size, re-measured on demand.
 # `stty size` reads the window off stdin; `tput lines/cols` asks *stderr* on some
@@ -885,6 +891,34 @@ _cpg_pinned_ok() {
   (( _CPG_ROWS >= 10 && _CPG_COLS >= 24 ))
 }
 
+# The alternate screen is what actually pins the box against scrolling: on the main
+# screen the wheel moves the *terminal's* viewport, and no application can stop the
+# box from sliding out of view with it. Here the app owns the screen, the wheel is
+# delivered to us as input (SGR mouse reports), and scrolling means repainting the
+# pane from the mirror - the box never moves. Costs: the pane's scrollback is ours,
+# not the terminal's (dumped back to the main screen on exit, so nothing is lost),
+# and selecting text with the mouse needs the terminal's modifier (Option-drag in
+# Terminal.app/iTerm2) while mouse reporting is on. CPG_ALTSCREEN=0 opts out.
+_cpg_alt_on() {
+  [[ "${CPG_ALTSCREEN:-1}" != "0" ]] || return 0
+  _CPG_ALT=1
+  # ?1049h = alternate screen, ?1000h = report button presses, ?1006h = report them
+  # in SGR form (`ESC [ < b ; x ; y M`), which is the only encoding that survives
+  # coordinates past column 223.
+  printf '\033[?1049h\033[?1000h\033[?1006h'
+}
+
+_cpg_alt_off() {
+  [[ "$_CPG_ALT" == "1" ]] || return 0
+  _CPG_ALT=0
+  printf '\033[?1006l\033[?1000l\033[?1049l'
+  # Back on the main screen the session's output would be gone, so hand it over -
+  # the pane's own scrollback, dropped into the real one.
+  if [[ -s "$_CPG_LOG" ]]; then
+    tail -n 500 "$_CPG_LOG"
+  fi
+}
+
 _cpg_region_on() {
   _CPG_PINNED=1
   # DECSTBM homes the cursor, hence the explicit move down into the region after it.
@@ -914,6 +948,8 @@ _cpg_region_off() {
 # instead of its live-redrawing ones.
 _cpg_out() {
   local sep=0
+  # New output goes at the bottom; if the pane was scrolled up, come back first.
+  _cpg_scroll_reset
   [[ -s "$_CPG_LOG" ]] && sep=1
   # DECRC (ESC 8) puts the cursor back where the last pane output ended, so a fresh
   # or just-cleared pane fills from the TOP and only starts scrolling once it's full
@@ -930,8 +966,9 @@ _cpg_out() {
   fi
   # Bounded: only the last screenful is ever replayed, so keep the tail and drop the
   # rest once the file gets big.
-  if [[ -s "$_CPG_LOG" ]] && (( $(wc -c < "$_CPG_LOG") > 1048576 )); then
-    tail -n 500 "$_CPG_LOG" > "$_CPG_LOG.trim" 2>/dev/null && mv "$_CPG_LOG.trim" "$_CPG_LOG"
+  # The mirror is the pane's scrollback now, so keep a useful amount of it.
+  if [[ -s "$_CPG_LOG" ]] && (( $(wc -c < "$_CPG_LOG") > 4194304 )); then
+    tail -n 5000 "$_CPG_LOG" > "$_CPG_LOG.trim" 2>/dev/null && mv "$_CPG_LOG.trim" "$_CPG_LOG"
   fi
   # pipefail (set at the top of the script) keeps the command's own status instead of
   # tee's, so `/exit` still reports "leave the REPL" through this. The blank
@@ -987,11 +1024,36 @@ _cpg_repaint_pane() {
   # position back to _cpg_out for the next command.
   if [[ -s "$_CPG_LOG" ]]; then
     local line
+    # _CPG_SCROLL lines back from the newest output, one screenful of it.
     while IFS= read -r line; do
       _cpg_status_refit "$line"
-    done < <(tail -n "$_CPG_BOTTOM" "$_CPG_LOG")
+    done < <(tail -n "$(( _CPG_BOTTOM + _CPG_SCROLL ))" "$_CPG_LOG" | head -n "$_CPG_BOTTOM")
   fi
   printf '\0337'
+}
+
+# Scrolls the pane by $1 lines (negative = back towards the newest output) and
+# repaints. Only possible on the alternate screen: on the main screen the terminal's
+# own viewport does the scrolling and the mirror isn't involved at all.
+_cpg_scroll_by() {
+  [[ "$_CPG_ALT" == "1" && -s "$_CPG_LOG" ]] || return 0
+  local total max want
+  total=$(wc -l < "$_CPG_LOG")
+  max=$(( total - _CPG_BOTTOM ))
+  (( max < 0 )) && max=0
+  want=$(( _CPG_SCROLL + $1 ))
+  (( want < 0 )) && want=0
+  (( want > max )) && want=$max
+  (( want == _CPG_SCROLL )) && return 0
+  _CPG_SCROLL=$want
+  _cpg_repaint_pane
+}
+
+# Any new output belongs at the bottom, so jump back there first.
+_cpg_scroll_reset() {
+  (( _CPG_SCROLL == 0 )) && return 0
+  _CPG_SCROLL=0
+  _cpg_repaint_pane
 }
 
 # Repaints the 4 pinned rows (hint, box top, input, box bottom) and parks the cursor
@@ -1006,8 +1068,10 @@ _cpg_render() {
   # Built as one string and written once, with the cursor hidden across it. Six
   # separate printfs let the terminal paint half-finished states - visible as a
   # flicker on every keystroke, and as a stuttering box while dragging a resize.
+  local hint="$_CPG_HINT"
+  (( _CPG_SCROLL > 0 )) && hint="↑ $_CPG_SCROLL baris ke atas · End/PgDn buat balik ke bawah"
   printf -v out '\033[?25l\033[%d;1H\033[2K%s%s%s\033[%d;1H\033[2K%s╭%s╮%s\033[%d;1H\033[2K%s│%s %s❯%s %s\033[%d;%dH%s│%s\033[%d;1H\033[2K%s╰%s╯%s\033[%d;%dH\033[?25h' \
-    $(( _CPG_ROWS - 3 )) "$C_DIM" "${_CPG_HINT:0:_CPG_COLS}" "$C_RESET" \
+    $(( _CPG_ROWS - 3 )) "$C_DIM" "${hint:0:_CPG_COLS}" "$C_RESET" \
     $(( _CPG_ROWS - 2 )) "$C_DIM" "$bar" "$C_RESET" \
     $(( _CPG_ROWS - 1 )) "$C_DIM" "$C_RESET" "$C_ACCENT" "$C_RESET" "$view" \
     $(( _CPG_ROWS - 1 )) "$_CPG_COLS" "$C_DIM" "$C_RESET" \
@@ -1089,8 +1153,10 @@ _cpg_read_line() {
         # resize replays exactly what was just cleared. Pane cursor goes back to the
         # top, so the next command's output starts there.
         [[ -n "$_CPG_LOG" ]] && : > "$_CPG_LOG"
+        _CPG_SCROLL=0
         printf '\033[1;1H\033[0J\0337' ;;
       $'\t')
+        _cpg_scroll_reset
         _CPG_CL="$_CPG_BUF"; _CPG_CP=$_CPG_POS
         _cpg_complete_core
         _CPG_BUF="$_CPG_CL"; _CPG_POS=$_CPG_CP
@@ -1126,7 +1192,42 @@ _cpg_read_line() {
           '[C'|'OC') if (( _CPG_POS < ${#_CPG_BUF} )); then _CPG_POS=$(( _CPG_POS + 1 )); fi ;;
           '[D'|'OD') if (( _CPG_POS > 0 )); then _CPG_POS=$(( _CPG_POS - 1 )); fi ;;
           '[H'|'OH') _CPG_POS=0 ;;
-          '[F'|'OF') _CPG_POS=${#_CPG_BUF} ;;
+          # End doubles as "back to the newest output" while the pane is scrolled -
+          # that's what the scroll indicator tells you to press.
+          '[F'|'OF') _cpg_scroll_reset; _CPG_POS=${#_CPG_BUF} ;;
+          '[5') IFS= read -rsn1 -t 0.05 junk || true   # PageUp: half a screen back
+                _cpg_scroll_by $(( _CPG_BOTTOM / 2 )) ;;
+          '[6') IFS= read -rsn1 -t 0.05 junk || true   # PageDown
+                _cpg_scroll_by $(( - _CPG_BOTTOM / 2 )) ;;
+          '[<') # SGR mouse report: ESC [ < button ; col ; row M/m. Wheel up is
+                # button 64, wheel down 65; everything else (clicks, drags) is read
+                # to the end of the report and dropped, so it can't leak into the
+                # input line. `if`/`: ;;` rather than `&&`: a false test as the last
+                # command in here would make the case return 1, which `set -e` reads
+                # as a failure and kills the REPL.
+            local mouse="" mc=""
+            while IFS= read -rsn1 -t 0.05 mc; do
+              mouse+="$mc"
+              if [[ "$mc" == [Mm] ]]; then break; fi
+            done
+            case "$mouse" in
+              64*) _cpg_scroll_by 3 ;;
+              65*) _cpg_scroll_by -3 ;;
+              *) : ;;
+            esac ;;
+          '[M') # X10 mouse report: ESC [ M then 3 bytes (button+32, x+32, y+32).
+                # What a terminal falls back to when it doesn't do SGR (?1006) - and
+                # the bytes MUST be eaten either way, or they land in the input line
+                # as garbage characters.
+            local b="" bx="" by=""
+            IFS= read -rsn1 -t 0.05 b || true
+            IFS= read -rsn1 -t 0.05 bx || true
+            IFS= read -rsn1 -t 0.05 by || true
+            case "$b" in
+              '`') _cpg_scroll_by 3 ;;   # 96 = 64 (wheel up) + 32
+              a) _cpg_scroll_by -3 ;;    # 97 = 65 (wheel down) + 32
+              *) : ;;
+            esac ;;
           # `ESC [ n ~` keys: the trailing `~` is still unread, so eat it.
           '[1'|'[7') IFS= read -rsn1 -t 0.05 junk || true; _CPG_POS=0 ;;
           '[4'|'[8') IFS= read -rsn1 -t 0.05 junk || true; _CPG_POS=${#_CPG_BUF} ;;
@@ -1140,6 +1241,8 @@ _cpg_read_line() {
         if [[ "$key" == *[[:cntrl:]]* ]]; then
           continue
         fi
+        # Typing means you're done reading scrollback.
+        _cpg_scroll_reset
         _CPG_BUF="${_CPG_BUF:0:_CPG_POS}$key${_CPG_BUF:_CPG_POS}"
         _CPG_POS=$(( _CPG_POS + 1 )) ;;
     esac
@@ -1204,8 +1307,9 @@ _cpg_run_line() {
 repl_pinned() {
   _cpg_term_size
   _CPG_LOG=$(mktemp -t cpg-pane 2>/dev/null) || _CPG_LOG=""
-  trap '_cpg_region_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"' EXIT
+  trap '_cpg_region_off; _cpg_alt_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"' EXIT
   trap '_CPG_WINCH=1' WINCH
+  _cpg_alt_on
   printf '\033[2J\033[H\0337' # start clean, pane cursor at the top of the screen
   _cpg_region_on
   _cpg_out _cpg_intro
@@ -1218,6 +1322,7 @@ repl_pinned() {
     if ! _cpg_out _cpg_run_line "$line"; then break; fi
   done
   _cpg_region_off
+  _cpg_alt_off
   [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim" "$_CPG_LOG.status"
   trap - EXIT WINCH
   echo "Bye."

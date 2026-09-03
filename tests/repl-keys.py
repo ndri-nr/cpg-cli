@@ -39,6 +39,18 @@ STEPS = [
     (b"\x15abc\x1b[D\x1b[Dx", "insert in the middle"),
     (b"\x15\r", "Enter on an empty line"),
     (b"/status\r", "a real command"),
+    (b"/help\r", "output longer than the pane"),
+    (b"\x1b[5~", "PageUp (scroll back)"),
+    (b"\x1b[5~", "PageUp again"),
+    (b"\x1b[<64;10;10M", "wheel up"),
+    (b"\x1b[<65;10;10M", "wheel down"),
+    (b"\x1b[<0;10;10M\x1b[<0;10;10m", "mouse click (dropped)"),
+    (b"\x1b[M`((", "X10 wheel up"),
+    (b"\x1b[Ma((", "X10 wheel down"),
+    (b"\x1b[M ((", "X10 click (dropped)"),
+    (b"\x1b[6~", "PageDown"),
+    (b"x", "typing jumps back to the bottom"),
+    (b"\x15", "clear the line"),
     (b"/exit\r", "exit"),
 ]
 
@@ -103,6 +115,13 @@ def main():
     # The scroll region must be released, or the terminal is left broken.
     if "\x1b[r" not in text:
         print("FAIL: scroll region never reset (missing ESC[r)")
+        return 1
+    # Alternate screen and mouse reporting must both be handed back.
+    if "\x1b[?1049h" in text and "\x1b[?1049l" not in text:
+        print("FAIL: never left the alternate screen")
+        return 1
+    if "\x1b[?1000h" in text and "\x1b[?1000l" not in text:
+        print("FAIL: mouse reporting left enabled")
         return 1
     print(f"ok - {len(STEPS)} edge cases, clean exit, scroll region restored")
     return 0
