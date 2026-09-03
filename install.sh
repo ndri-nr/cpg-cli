@@ -52,9 +52,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$HOME/.local/bin"
 mkdir -p "$INSTALL_DIR"
 
+# Wrapper calls `bash cpg-cli.sh`, not the script directly - then `cpg` keeps
+# working even where the repo's exec bits didn't survive the checkout.
 cat > "$INSTALL_DIR/cpg" <<EOF
 #!/usr/bin/env bash
-exec "$REPO_ROOT/cpg-cli.sh" "\$@"
+exec bash "$REPO_ROOT/cpg-cli.sh" "\$@"
 EOF
 chmod +x "$INSTALL_DIR/cpg"
 

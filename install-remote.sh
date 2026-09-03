@@ -22,4 +22,7 @@ else
   git clone "$REPO_URL" "$TARGET_DIR"
 fi
 
-exec "$TARGET_DIR/install.sh"
+# `bash <script>` instead of executing it directly: a fresh clone's install.sh only
+# has the exec bit if git recorded one, and this same one-liner runs on noexec
+# mounts and Windows checkouts where it never survives.
+exec bash "$TARGET_DIR/install.sh"
