@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Interactive start/stop/restart by group. Each group is its OWN docker-compose project
   (compose/<group>.yml), so this wraps `docker compose -f compose/<group>.yml ...` per
@@ -38,9 +38,13 @@ $GroupFile = @{
   ai            = "compose/ai.yml"
 }
 
+# Deliberately excludes one-shot bootstrap jobs (mongo-cluster-init, redis-cluster-init)
+# - they're supposed to exit 0 and stay exited, so counting them would make a
+# fully-healthy group show as "partial" forever. `up -d` (the first-run fallback in
+# Invoke-Start) still creates them fine, this list just isn't used for that.
 $SvcGroups = [ordered]@{
-  database      = @("postgres", "postgres-replica-1", "postgres-replica-2", "pgpool", "timescaledb", "mongo-primary", "mongo-replica-1", "mongo-replica-2", "mongo-cluster-init", "mongo-express")
-  cache         = @("redis", "redis-insight", "redis-cluster-1", "redis-cluster-2", "redis-cluster-3", "redis-cluster-4", "redis-cluster-5", "redis-cluster-6", "redis-cluster-init")
+  database      = @("postgres", "postgres-replica-1", "postgres-replica-2", "pgpool", "timescaledb", "mongo-primary", "mongo-replica-1", "mongo-replica-2", "mongo-express")
+  cache         = @("redis", "redis-insight", "redis-cluster-1", "redis-cluster-2", "redis-cluster-3", "redis-cluster-4", "redis-cluster-5", "redis-cluster-6")
   messaging     = @("rabbitmq")
   observability = @("otel-collector", "tempo", "prometheus", "grafana")
   quality       = @("sonarqube")
@@ -69,8 +73,10 @@ $CmdAlias = @{
   reboot = "restart"; rs = "restart"; re = "restart"
   st = "status"; ls = "status"; list = "status"; stat = "status"; stats = "status"; cek = "status"; check = "status"
   info = "detail"; conn = "detail"; connection = "detail"; creds = "detail"; credentials = "detail"; cred = "detail"
+  upgrade = "update"; "self-update" = "update"; pull = "update"; upd = "update"
+  remove = "uninstall"; unlink = "uninstall"
 }
-$Cmds = @("status", "start", "stop", "restart", "detail")
+$Cmds = @("status", "start", "stop", "restart", "detail", "update", "uninstall")
 
 function Invoke-Compose {
   param([string]$GroupName, [string[]]$Rest)
@@ -99,6 +105,10 @@ function Get-Levenshtein([string]$a, [string]$b) {
   return $d[$la, $lb]
 }
 
+# Returns the resolved canonical option on success (exact match, alias, unique
+# prefix, or a confirmed close-typo guess). Returns $null if it can't figure it out -
+# but not silently: prints the closest options ranked by similarity, so a totally-off
+# guess still gets a useful recommendation instead of just "not found".
 function Resolve-Choice([string]$val, [hashtable]$aliasMap, [string[]]$options) {
   $val = $val.ToLowerInvariant()
   if ($options -contains $val) { return $val }
@@ -107,26 +117,28 @@ function Resolve-Choice([string]$val, [hashtable]$aliasMap, [string[]]$options) 
   $prefixMatches = $options | Where-Object { $_.StartsWith($val) }
   if (@($prefixMatches).Count -eq 1) { return $prefixMatches }
 
-  $best = $null; $bestDist = [int]::MaxValue
-  foreach ($o in $options) {
-    $dist = Get-Levenshtein $val $o
-    if ($dist -lt $bestDist) { $bestDist = $dist; $best = $o }
-  }
-  if ($best -and $bestDist -le 2) {
-    $yn = Read-Host "Gak nemu persis '$val'. Maksud lu '$best'? (y/n)"
-    if ($yn -match '^[Yy]') { return $best }
+  $scored = $options | ForEach-Object { [PSCustomObject]@{ Opt = $_; Dist = Get-Levenshtein $val $_ } } | Sort-Object Dist
+  $best = $scored[0]
+
+  if ($best.Dist -le 2) {
+    $yn = Read-Host "? Gak nemu persis '$val'. Maksud lu '$($best.Opt)'? (y/n)"
+    if ($yn -match '^[Yy]') { return $best.Opt }
+  } else {
+    $suggestions = ($scored | Select-Object -First 3 -ExpandProperty Opt) -join ', '
+    Write-Host "✗ Gak ngerti '$val'. Mirip² gini: $suggestions" -ForegroundColor Red
   }
   return $null
 }
 
-# Returns the resolved group name, or $null (after printing why) if it can't figure
-# it out - never exits the process, so the REPL loop can recover from a bad name
-# instead of the whole shell dying.
+# Returns the resolved group name, or $null if it can't figure it out - never exits
+# the process, so the REPL loop can recover from a bad name instead of the whole
+# shell dying. Resolve-Choice already told the user what it's close to; this just
+# adds the full list as a last-resort fallback.
 function Resolve-GroupOrDie([string]$val) {
   if ($SvcGroups.Contains($val)) { return $val }
   $resolved = Resolve-Choice $val $GroupAlias @($SvcGroups.Keys)
   if ($resolved) { return $resolved }
-  Write-Host "Gak nemu grup '$val'. Grup yang ada: $($SvcGroups.Keys -join ', ')"
+  Write-Host "  (grup yang ada: $($SvcGroups.Keys -join ', '))" -ForegroundColor DarkGray
   return $null
 }
 
@@ -152,9 +164,10 @@ function Get-GroupState($groupName) {
 
 function Write-GroupLine($info) {
   $color = switch ($info.State) { "up" { "Green" }; "partial" { "Yellow" }; "down" { "Red" } }
-  Write-Host -NoNewline ("{0,-16}" -f $info.Group)
-  Write-Host -NoNewline "[$($info.Running)/$($info.Total) running]  " -ForegroundColor $color
-  Write-Host ($info.Services -join " ") -ForegroundColor DarkGray
+  Write-Host -NoNewline "  ● " -ForegroundColor $color
+  Write-Host -NoNewline ("{0,-15}" -f $info.Group)
+  Write-Host -NoNewline -ForegroundColor $color ("{0,2}/{1,-2}  " -f $info.Running, $info.Total)
+  Write-Host ($info.Services -join ", ") -ForegroundColor DarkGray
 }
 
 function Show-Status([string]$filter) {
@@ -162,7 +175,6 @@ function Show-Status([string]$filter) {
     $filter = Resolve-GroupOrDie $filter
     if (-not $filter) { return }
   }
-  Write-Host "GROUP            STATUS"
   foreach ($g in $SvcGroups.Keys) {
     if ($filter -and $g -ne $filter) { continue }
     Write-GroupLine (Get-GroupState $g)
@@ -170,13 +182,13 @@ function Show-Status([string]$filter) {
 }
 
 function Select-FromMenu([string]$prompt, [string[]]$choices) {
-  Write-Host $prompt
-  for ($i = 0; $i -lt $choices.Count; $i++) { Write-Host "  $($i + 1)) $($choices[$i])" }
-  Write-Host "  0) cancel"
-  $pick = Read-Host "Pilih nomor"
+  Write-Host "? $prompt" -ForegroundColor DarkYellow
+  for ($i = 0; $i -lt $choices.Count; $i++) { Write-Host "  $($i + 1)) $($choices[$i])" -ForegroundColor DarkGray }
+  Write-Host "  0) cancel" -ForegroundColor DarkGray
+  $pick = Read-Host "  ❯"
   if ($pick -eq "0" -or [string]::IsNullOrWhiteSpace($pick)) { return $null }
   if ($pick -notmatch '^\d+$' -or [int]$pick -lt 1 -or [int]$pick -gt $choices.Count) {
-    Write-Host "Pilihan gak valid."
+    Write-Host "✗ Pilihan gak valid." -ForegroundColor Red
     return $null
   }
   return $choices[[int]$pick - 1]
@@ -195,6 +207,8 @@ Usage:
   ./cpg-cli.ps1 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
   ./cpg-cli.ps1 restart [grup]
   ./cpg-cli.ps1 detail [grup]      connection info (host/port/user/pass/URI) per service
+  ./cpg-cli.ps1 update             git pull cpg-cli itself + refresh the cpg wrapper
+  ./cpg-cli.ps1 uninstall          remove the cpg command (repo/containers/data untouched)
 
 Grup: $($SvcGroups.Keys -join ', ')
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
@@ -212,7 +226,7 @@ function Ensure-Dependencies([string]$groupName) {
   if (-not $deps) { return }
   foreach ($dep in $deps) {
     if (-not (Test-NetworkExists $dep)) {
-      Write-Host "'$groupName' butuh network '$dep' - nyalain dulu..." -ForegroundColor Yellow
+      Write-Host "! '$groupName' butuh network '$dep' - nyalain dulu..." -ForegroundColor Yellow
       Invoke-Compose $dep @("up", "-d")
     }
   }
@@ -228,15 +242,16 @@ function Invoke-Start([string]$groupName) {
   if (-not $groupName) {
     $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "up" }
     if (-not $candidates) {
-      Write-Host "Semua grup udah nyala semua." -ForegroundColor Green
+      Write-Host "✓ Semua grup udah nyala semua." -ForegroundColor Green
       return
     }
     $groupName = Select-FromMenu "Grup mana yang mau di-start?" @($candidates)
-    if (-not $groupName) { Write-Host "Batal."; return }
+    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
   }
   Ensure-Dependencies $groupName
   $svcs = $SvcGroups[$groupName]
-  Write-Host "==> docker compose -f $($GroupFile[$groupName]) start $($svcs -join ' ')"
+  Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
+  Write-Host "docker compose -f $($GroupFile[$groupName]) start $($svcs -join ' ')"
   # `start` only works on containers that already exist - first-ever run falls back to
   # `up -d` to actually create them.
   Invoke-Compose $groupName (@("start") + $svcs)
@@ -251,14 +266,15 @@ function Invoke-Stop([string]$groupName) {
   if (-not $groupName) {
     $candidates = $SvcGroups.Keys | Where-Object { (Get-GroupState $_).State -ne "down" }
     if (-not $candidates) {
-      Write-Host "Emang lagi gak ada yang jalan." -ForegroundColor Yellow
+      Write-Host "! Emang lagi gak ada yang jalan." -ForegroundColor Yellow
       return
     }
     $groupName = Select-FromMenu "Grup mana yang mau di-stop?" @($candidates)
-    if (-not $groupName) { Write-Host "Batal."; return }
+    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
   }
   $svcs = $SvcGroups[$groupName]
-  Write-Host "==> docker compose -f $($GroupFile[$groupName]) stop $($svcs -join ' ')"
+  Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
+  Write-Host "docker compose -f $($GroupFile[$groupName]) stop $($svcs -join ' ')"
   Invoke-Compose $groupName (@("stop") + $svcs)
 }
 
@@ -269,11 +285,12 @@ function Invoke-Restart([string]$groupName) {
   }
   if (-not $groupName) {
     $groupName = Select-FromMenu "Grup mana yang mau di-restart?" @($SvcGroups.Keys)
-    if (-not $groupName) { Write-Host "Batal."; return }
+    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
   }
   Ensure-Dependencies $groupName
   $svcs = $SvcGroups[$groupName]
-  Write-Host "==> docker compose -f $($GroupFile[$groupName]) restart $($svcs -join ' ')"
+  Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
+  Write-Host "docker compose -f $($GroupFile[$groupName]) restart $($svcs -join ' ')"
   Invoke-Compose $groupName (@("restart") + $svcs)
 }
 
@@ -286,7 +303,7 @@ function Show-Detail([string]$groupName) {
     if (-not $groupName) { return }
   } else {
     $groupName = Select-FromMenu "Grup mana yang mau dilihat detailnya?" @($SvcGroups.Keys)
-    if (-not $groupName) { Write-Host "Batal."; return }
+    if (-not $groupName) { Write-Host "(batal)" -ForegroundColor DarkGray; return }
   }
 
   switch ($groupName) {
@@ -394,15 +411,76 @@ chromadb  (no auth by default)
   }
 }
 
+# git pull the repo this script lives in, then re-run install.ps1 so the cpg wrapper
+# itself picks up any changes (renamed script, new install logic, etc). Never touches
+# your containers.
+function Invoke-Update {
+  Push-Location $PSScriptRoot
+  try {
+    git rev-parse --is-inside-work-tree *> $null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "$PSScriptRoot isn't a git repo - can't self-update this way."
+      Write-Host "Re-clone from https://github.com/ndri-nr/cpg-cli or download the latest release."
+      return
+    }
+
+    $before = (git rev-parse --short HEAD).Trim()
+    Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
+    Write-Host "git pull (in $PSScriptRoot)"
+    git pull --ff-only
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "✗ Update gagal - local changes atau conflict kayaknya. Cek manual: git -C `"$PSScriptRoot`" status" -ForegroundColor Red
+      return
+    }
+    $after = (git rev-parse --short HEAD).Trim()
+
+    if ($before -eq $after) {
+      Write-Host "✓ Udah versi terbaru ($after)." -ForegroundColor Green
+      return
+    }
+
+    Write-Host "✓ Updated $before -> $after." -ForegroundColor Green
+    if (Test-Path "./install.ps1") {
+      Write-Host "Re-running install.ps1 to refresh the cpg wrapper..."
+      & "./install.ps1"
+    }
+  } finally {
+    Pop-Location
+  }
+}
+
+# Removes the ~/.local/bin cpg wrapper - never touches this repo, running containers,
+# or volumes/data (see uninstall.ps1's own comment).
+function Invoke-Uninstall {
+  $yn = Read-Host "? Uninstall the cpg command? Repo/containers/data stay untouched. (y/n)"
+  if ($yn -notmatch '^[Yy]') {
+    Write-Host "(batal)" -ForegroundColor DarkGray
+    return
+  }
+  $script = Join-Path $PSScriptRoot "uninstall.ps1"
+  if (Test-Path $script) {
+    & $script
+  } else {
+    Write-Host "uninstall.ps1 not found in $PSScriptRoot."
+  }
+}
+
 # --- REPL (bare cpg, no args) ---------------------------------------------
 
 function Start-Repl {
-  Write-Host "cpg interactive shell. /help buat commands, /exit buat keluar." -ForegroundColor White
+  Write-Host "╭────────────────────────────────────╮" -ForegroundColor DarkYellow
+  Write-Host -NoNewline "│ " -ForegroundColor DarkYellow
+  Write-Host -NoNewline "✳ " -ForegroundColor DarkYellow
+  Write-Host -NoNewline "cpg · compose playground control "
+  Write-Host "│" -ForegroundColor DarkYellow
+  Write-Host "╰────────────────────────────────────╯" -ForegroundColor DarkYellow
+  Write-Host "/help buat commands · /exit buat keluar" -ForegroundColor DarkGray
   Write-Host ""
   Show-Status ""
   while ($true) {
     Write-Host ""
-    $line = Read-Host "cpg>"
+    Write-Host -NoNewline "❯ " -ForegroundColor DarkYellow
+    $line = Read-Host
     if ($null -eq $line) { break }
     $line = $line.TrimStart("/")
     if (-not $line.Trim()) { continue }
@@ -415,7 +493,7 @@ function Start-Repl {
 
     $resolved = Resolve-Choice $subCmd $CmdAlias $Cmds
     if (-not $resolved) {
-      Write-Host "Gak ngerti command '$subCmd'. /help buat liat commands."
+      Write-Host "  (/help buat liat semua command)" -ForegroundColor DarkGray
       continue
     }
     switch ($resolved) {
@@ -424,6 +502,8 @@ function Start-Repl {
       "stop" { Invoke-Stop $subArg }
       "restart" { Invoke-Restart $subArg }
       "detail" { Show-Detail $subArg }
+      "update" { Invoke-Update }
+      "uninstall" { Invoke-Uninstall }
     }
   }
   Write-Host "Bye."
@@ -439,7 +519,6 @@ if ($Command -in @("-h", "--help", "help")) {
 if ($Command -and $Command -notin $Cmds) {
   $resolvedCmd = Resolve-Choice $Command $CmdAlias $Cmds
   if (-not $resolvedCmd) {
-    Write-Host "Gak ngerti command '$Command'."
     Show-Help
     exit 1
   }
@@ -452,5 +531,7 @@ switch ($Command) {
   "stop" { Invoke-Stop $Group }
   "restart" { Invoke-Restart $Group }
   "detail" { Show-Detail $Group }
+  "update" { Invoke-Update }
+  "uninstall" { Invoke-Uninstall }
   "" { Start-Repl }
 }

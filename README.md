@@ -54,20 +54,22 @@ Run it bare to drop into an interactive shell - like `claude`'s own REPL:
 
 ```
 $ cpg
-cpg interactive shell. /help buat commands, /exit buat keluar.
+╭────────────────────────────────────╮
+│ ✳ cpg · compose playground control │
+╰────────────────────────────────────╯
+/help buat commands · /exit buat keluar
 
-GROUP            STATUS
-database         [9/10 running]  postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongo-primary mongo-replica-1 mongo-replica-2 mongo-cluster-init mongo-express
-cache            [8/9 running]  redis redis-insight redis-cluster-1 ...
+  ● database        9/9   postgres, postgres-replica-1, postgres-replica-2, pgpool, timescaledb, mongo-primary, mongo-replica-1, mongo-replica-2, mongo-express
+  ● cache           8/8   redis, redis-insight, redis-cluster-1, ...
+  ...
+
+❯ /stop cache
+▸ docker compose -f compose/cache.yml stop redis redis-insight ...
+
+❯ /start database
 ...
 
-cpg> /stop cache
-==> docker compose -f compose/cache.yml stop redis redis-insight ...
-
-cpg> /start database
-...
-
-cpg> /exit
+❯ /exit
 Bye.
 ```
 
@@ -80,13 +82,16 @@ cpg start [group]      # no group -> pick from what's not fully up yet
 cpg stop  [group]      # no group -> pick from what's actually running
 cpg restart [group]
 cpg detail [group]     # connection info per service: host/port/user/pass/URI
+cpg update             # git pull cpg-cli itself + refresh the cpg wrapper
+cpg uninstall          # remove the cpg command (repo/containers/data untouched)
 cpg help
 ```
 
 Forgiving input everywhere (shell or one-shot): case-insensitive, understands
 aliases (`db`, `redis`, `rabbit`, `obs`, `sonar`, `chroma`, `up`/`down`, ...),
 unique prefixes (`obs` -> `observability`), and asks "did you mean X?" on a
-close typo instead of just failing.
+close typo. Even a typo too far off to auto-confirm still gets a ranked
+"mirip² gini: ..." recommendation instead of a flat "not found".
 
 If you didn't install it globally, run it straight from the repo instead:
 `./cpg-cli.sh ...` or `./cpg-cli.ps1 ...`.
@@ -261,6 +266,13 @@ cpg-cli/
   bind-mount can't preserve directly - `mongo/mongo-entrypoint.sh` copies it
   into the container and fixes ownership/permissions before starting `mongod`,
   same trick as `postgres/replica-entrypoint.sh`.
+- **`cpg-cli.ps1` is saved with a UTF-8 BOM on purpose.** Windows PowerShell
+  5.1 parses a `.ps1` file with no BOM using the system's ANSI codepage, not
+  UTF-8 - the moment the file has any non-ASCII character (the ✳/●/▸/❯ icons),
+  that misreads multi-byte sequences as garbage and breaks parsing, including
+  here-strings further down the file. If you edit this file with a tool that
+  strips the BOM, re-add it: `Set-Content -Path cpg-cli.ps1 -Value (Get-Content
+  -Raw -Encoding UTF8 cpg-cli.ps1) -Encoding UTF8 -NoNewline`.
 
 ## License
 

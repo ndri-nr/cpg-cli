@@ -30,10 +30,14 @@ declare -A GROUP_FILE=(
   [ai]="compose/ai.yml"
 )
 # group -> its services (space-separated). Only used for status/start/stop lists -
-# `compose ps`/`start`/`stop` with no service args already means "every service in the file".
+# `compose ps`/`start`/`stop` with no service args already means "every service in the
+# file". Deliberately excludes one-shot bootstrap jobs (mongo-cluster-init,
+# redis-cluster-init) - they're supposed to exit 0 and stay exited, so counting them
+# would make a fully-healthy group show as "partial" forever. `up -d` (the first-run
+# fallback in do_start) still creates them fine, this list just isn't used for that.
 declare -A SVC_GROUPS=(
-  [database]="postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongo-primary mongo-replica-1 mongo-replica-2 mongo-cluster-init mongo-express"
-  [cache]="redis redis-insight redis-cluster-1 redis-cluster-2 redis-cluster-3 redis-cluster-4 redis-cluster-5 redis-cluster-6 redis-cluster-init"
+  [database]="postgres postgres-replica-1 postgres-replica-2 pgpool timescaledb mongo-primary mongo-replica-1 mongo-replica-2 mongo-express"
+  [cache]="redis redis-insight redis-cluster-1 redis-cluster-2 redis-cluster-3 redis-cluster-4 redis-cluster-5 redis-cluster-6"
   [messaging]="rabbitmq"
   [observability]="otel-collector tempo prometheus grafana"
   [quality]="sonarqube"
@@ -62,14 +66,17 @@ declare -A CMD_ALIAS=(
   [reboot]=restart [rs]=restart [re]=restart
   [st]=status [ls]=status [list]=status [stat]=status [stats]=status [cek]=status [check]=status
   [info]=detail [conn]=detail [connection]=detail [creds]=detail [credentials]=detail [cred]=detail
+  [upgrade]=update [self-update]=update [pull]=update [upd]=update
+  [remove]=uninstall [unlink]=uninstall
 )
-CMDS=(status start stop restart detail)
+CMDS=(status start stop restart detail update uninstall)
 
 if [[ -t 1 ]]; then
   C_GREEN=$'\033[0;32m'; C_YELLOW=$'\033[0;33m'; C_RED=$'\033[0;31m'
+  C_ACCENT=$'\033[38;5;209m' # warm coral/orange, closer to Claude's own accent than plain cyan
   C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_RESET=$'\033[0m'
 else
-  C_GREEN=""; C_YELLOW=""; C_RED=""; C_BOLD=""; C_DIM=""; C_RESET=""
+  C_GREEN=""; C_YELLOW=""; C_RED=""; C_ACCENT=""; C_BOLD=""; C_DIM=""; C_RESET=""
 fi
 
 dc() { docker compose -f "${GROUP_FILE[$1]}" "${@:2}"; }
@@ -100,7 +107,9 @@ levenshtein() {
 
 # resolve_choice <input> <alias-map-name> <option...>
 # Prints the resolved canonical option on success (exact match, alias, unique prefix,
-# or a confirmed fuzzy guess). Returns 1 (nothing printed) if it can't figure it out.
+# or a confirmed close-typo guess). Returns 1 if it can't figure it out - but not
+# silently: prints the closest options ranked by similarity, so a totally-off guess
+# still gets a useful recommendation instead of just "not found".
 resolve_choice() {
   local input="${1,,}" alias_map="$2"; shift 2
   local options=("$@")
@@ -113,22 +122,31 @@ resolve_choice() {
   for o in "${options[@]}"; do [[ "$o" == "$input"* ]] && matches+=("$o"); done
   if [[ ${#matches[@]} -eq 1 ]]; then echo "${matches[0]}"; return 0; fi
 
-  local best="" bestd=999 d
+  local scored=() o d
   for o in "${options[@]}"; do
     d=$(levenshtein "$input" "$o")
-    (( d < bestd )) && { bestd=$d; best=$o; }
+    scored+=("$d:$o")
   done
-  if [[ -n "$best" ]] && (( bestd <= 2 )); then
-    echo -n "Gak nemu persis '$input'. Maksud lu '${C_BOLD}${best}${C_RESET}'? (y/n) " >&2
+  IFS=$'\n' scored=($(sort -t: -k1,1n <<<"${scored[*]}")); unset IFS
+
+  local bestd="${scored[0]%%:*}" best="${scored[0]#*:}"
+  if (( bestd <= 2 )); then
+    echo -n "${C_YELLOW}?${C_RESET} Gak nemu persis '$input'. Maksud lu ${C_BOLD}${best}${C_RESET}? (y/n) " >&2
     local yn; read -r yn
     if [[ "$yn" =~ ^[Yy] ]]; then echo "$best"; return 0; fi
+  else
+    local i suggestions=()
+    for i in "${scored[@]:0:3}"; do suggestions+=("${i#*:}"); done
+    local IFS=', '
+    echo "${C_RED}✗${C_RESET} Gak ngerti '$input'. Mirip² gini: ${C_BOLD}${suggestions[*]}${C_RESET}" >&2
   fi
   return 1
 }
 
-# Prints the resolved group name and returns 0, or prints an error to stderr and
-# returns 1 - never exits the process (needed so the REPL loop can recover from a
-# bad group name instead of the whole shell dying).
+# Prints the resolved group name and returns 0, or returns 1 - never exits the
+# process (needed so the REPL loop can recover from a bad group name instead of the
+# whole shell dying). resolve_choice already told the user what it's close to; this
+# just adds the full list as a last-resort fallback.
 resolve_group_or_die() {
   local input="$1"
   [[ -n "${SVC_GROUPS[$input]:-}" ]] && { echo "$input"; return 0; }
@@ -136,7 +154,7 @@ resolve_group_or_die() {
   if resolved=$(resolve_choice "$input" GROUP_ALIAS "${GROUP_ORDER[@]}"); then
     echo "$resolved"; return 0
   fi
-  echo "Gak nemu grup '$input'. Grup yang ada: ${GROUP_ORDER[*]}" >&2
+  echo "${C_DIM}  (grup yang ada: ${GROUP_ORDER[*]})${C_RESET}" >&2
   return 1
 }
 
@@ -183,15 +201,16 @@ print_status() {
   if [[ -n "$filter" ]]; then
     if ! filter=$(resolve_group_or_die "$filter"); then return 1; fi
   fi
-  echo "${C_BOLD}GROUP            STATUS${C_RESET}"
   for group in "${GROUP_ORDER[@]}"; do
     [[ -n "$filter" && "$group" != "$filter" ]] && continue
     read -r running total <<<"$(group_counts "$group")"
     local state; state=$(group_state "$running" "$total")
     local color; color=$(state_color "$state")
-    printf "%-16s %s[%s/%s running]%s  %s%s%s\n" \
-      "$group" "$color" "$running" "$total" "$C_RESET" \
-      "$C_DIM" "${SVC_GROUPS[$group]}" "$C_RESET"
+    local services="${SVC_GROUPS[$group]// /, }"
+    printf "  %s●%s %-15s%s%2s/%-2s%s  %s%s%s\n" \
+      "$color" "$C_RESET" "$group" \
+      "$color" "$running" "$total" "$C_RESET" \
+      "$C_DIM" "$services" "$C_RESET"
   done
 }
 
@@ -199,18 +218,18 @@ print_status() {
 menu() {
   local prompt="$1"; shift
   local choices=("$@")
-  echo "$prompt" >&2
+  echo "${C_ACCENT}?${C_RESET} $prompt" >&2
   local i=1
   for c in "${choices[@]}"; do
-    echo "  $i) $c" >&2
+    echo "  ${C_DIM}$i)${C_RESET} $c" >&2
     i=$((i + 1))
   done
-  echo "  0) cancel" >&2
+  echo "  ${C_DIM}0) cancel${C_RESET}" >&2
   local pick
-  read -rp "Pilih nomor: " pick
+  read -rp "  ${C_BOLD}❯${C_RESET} " pick
   if [[ "$pick" == "0" || -z "$pick" ]]; then return 1; fi
   if ! [[ "$pick" =~ ^[0-9]+$ ]] || (( pick < 1 || pick > ${#choices[@]} )); then
-    echo "Pilihan gak valid." >&2
+    echo "${C_RED}✗${C_RESET} Pilihan gak valid." >&2
     return 1
   fi
   echo "${choices[$((pick - 1))]}"
@@ -229,6 +248,8 @@ Usage:
   $0 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
   $0 restart [grup]
   $0 detail [grup]      connection info (host/port/user/pass/URI) per service
+  $0 update             git pull cpg-cli itself + refresh the cpg wrapper
+  $0 uninstall          remove the cpg command (repo/containers/data untouched)
 
 Grup: ${GROUP_ORDER[*]}
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
@@ -268,14 +289,14 @@ do_start() {
       [[ "$(group_state "$running" "$total")" != "up" ]] && candidates+=("$g")
     done
     if [[ ${#candidates[@]} -eq 0 ]]; then
-      echo "${C_GREEN}Semua grup udah nyala semua.${C_RESET}"
+      echo "${C_GREEN}✓${C_RESET} Semua grup udah nyala semua."
       return 0
     fi
-    if ! group=$(menu "Grup mana yang mau di-start?" "${candidates[@]}"); then echo "Batal."; return 1; fi
+    if ! group=$(menu "Grup mana yang mau di-start?" "${candidates[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
   fi
 
   ensure_dependencies "$group"
-  echo "==> docker compose -f ${GROUP_FILE[$group]} start ${SVC_GROUPS[$group]}"
+  echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} start ${SVC_GROUPS[$group]}"
   # `start` only works on containers that already exist - first-ever run falls back to
   # `up -d` to actually create them. Only the fallback's stderr is worth hiding here.
   # shellcheck disable=SC2086
@@ -297,13 +318,13 @@ do_stop() {
       [[ "$(group_state "$running" "$total")" != "down" ]] && candidates+=("$g")
     done
     if [[ ${#candidates[@]} -eq 0 ]]; then
-      echo "${C_YELLOW}Emang lagi gak ada yang jalan.${C_RESET}"
+      echo "${C_YELLOW}!${C_RESET} Emang lagi gak ada yang jalan."
       return 0
     fi
-    if ! group=$(menu "Grup mana yang mau di-stop?" "${candidates[@]}"); then echo "Batal."; return 1; fi
+    if ! group=$(menu "Grup mana yang mau di-stop?" "${candidates[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
   fi
 
-  echo "==> docker compose -f ${GROUP_FILE[$group]} stop ${SVC_GROUPS[$group]}"
+  echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} stop ${SVC_GROUPS[$group]}"
   # shellcheck disable=SC2086
   dc "$group" stop ${SVC_GROUPS[$group]}
 }
@@ -314,10 +335,10 @@ do_restart() {
     if ! group=$(resolve_group_or_die "$group"); then return 1; fi
   fi
   if [[ -z "$group" ]]; then
-    if ! group=$(menu "Grup mana yang mau di-restart?" "${GROUP_ORDER[@]}"); then echo "Batal."; return 1; fi
+    if ! group=$(menu "Grup mana yang mau di-restart?" "${GROUP_ORDER[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
   fi
   ensure_dependencies "$group"
-  echo "==> docker compose -f ${GROUP_FILE[$group]} restart ${SVC_GROUPS[$group]}"
+  echo "${C_ACCENT}▸${C_RESET} docker compose -f ${GROUP_FILE[$group]} restart ${SVC_GROUPS[$group]}"
   # shellcheck disable=SC2086
   dc "$group" restart ${SVC_GROUPS[$group]}
 }
@@ -330,7 +351,7 @@ show_detail() {
   if [[ -n "$group" ]]; then
     if ! group=$(resolve_group_or_die "$group"); then return 1; fi
   else
-    if ! group=$(menu "Grup mana yang mau dilihat detailnya?" "${GROUP_ORDER[@]}"); then echo "Batal."; return 1; fi
+    if ! group=$(menu "Grup mana yang mau dilihat detailnya?" "${GROUP_ORDER[@]}"); then echo "${C_DIM}(batal)${C_RESET}"; return 1; fi
   fi
 
   case "$group" in
@@ -438,18 +459,75 @@ EOF
   esac
 }
 
+# git pull the repo this script lives in (cwd is already the repo root - see the `cd`
+# at the top of the file), then re-run install.sh so the cpg wrapper itself picks up
+# any changes (renamed script, new install logic, etc). Never touches your containers.
+do_update() {
+  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "$(pwd) isn't a git repo - can't self-update this way."
+    echo "Re-clone from https://github.com/ndri-nr/cpg-cli or download the latest release."
+    return 1
+  fi
+
+  local before after
+  before=$(git rev-parse --short HEAD)
+  echo "${C_ACCENT}▸${C_RESET} git pull (in $(pwd))"
+  if ! git pull --ff-only; then
+    echo "Update gagal - local changes atau conflict kayaknya. Cek manual: git -C \"$(pwd)\" status"
+    return 1
+  fi
+  after=$(git rev-parse --short HEAD)
+
+  if [[ "$before" == "$after" ]]; then
+    echo "${C_GREEN}✓${C_RESET} Udah versi terbaru ($after)."
+    return 0
+  fi
+
+  echo "${C_GREEN}✓${C_RESET} Updated $before -> $after."
+  if [[ -f ./install.sh ]]; then
+    echo "Re-running install.sh to refresh the cpg wrapper..."
+    bash ./install.sh
+  fi
+}
+
+# Removes the ~/.local/bin cpg wrapper - never touches this repo, running containers,
+# or volumes/data (see uninstall.sh's own comment).
+do_uninstall() {
+  local yn
+  read -rp "${C_YELLOW}?${C_RESET} Uninstall the cpg command? Repo/containers/data stay untouched. (y/n) " yn
+  if [[ ! "$yn" =~ ^[Yy] ]]; then
+    echo "${C_DIM}(batal)${C_RESET}"
+    return 1
+  fi
+  if [[ -f ./uninstall.sh ]]; then
+    bash ./uninstall.sh
+  else
+    echo "uninstall.sh not found in $(pwd)."
+    return 1
+  fi
+}
+
 # --- REPL (bare `cpg`, no args) --------------------------------------------
 
 repl() {
-  echo "${C_BOLD}cpg${C_RESET} interactive shell. /help buat commands, /exit buat keluar."
+  echo "${C_ACCENT}╭────────────────────────────────────╮${C_RESET}"
+  echo "${C_ACCENT}│${C_RESET} ${C_ACCENT}✳${C_RESET} ${C_BOLD}cpg${C_RESET} · compose playground control ${C_ACCENT}│${C_RESET}"
+  echo "${C_ACCENT}╰────────────────────────────────────╯${C_RESET}"
+  echo "${C_DIM}/help buat commands · /exit buat keluar${C_RESET}"
   echo
   print_status
+  history -c
   while true; do
     echo
-    if ! read -rp "${C_BOLD}cpg>${C_RESET} " line; then
+    # `-e` turns on readline for this read - without it, arrow keys just dump raw
+    # escape bytes into the buffer (garbled input, cursor jumps around but doesn't
+    # actually navigate). `history -s` after each line makes up/down arrow recall
+    # previous commands too, like a real shell.
+    if ! read -e -rp "${C_ACCENT}❯${C_RESET} " line; then
       echo
       break
     fi
+    [[ -n "${line// }" ]] && history -s "$line"
     line="${line#/}"
     [[ -z "$line" ]] && continue
     read -r sub_cmd sub_arg <<<"$line"
@@ -460,7 +538,7 @@ repl() {
     esac
 
     if ! resolved_cmd=$(resolve_choice "$sub_cmd" CMD_ALIAS "${CMDS[@]}"); then
-      echo "Gak ngerti command '$sub_cmd'. /help buat liat commands."
+      echo "${C_DIM}  (/help buat liat semua command)${C_RESET}"
       continue
     fi
 
@@ -470,6 +548,8 @@ repl() {
       stop) do_stop "$sub_arg" || true ;;
       restart) do_restart "$sub_arg" || true ;;
       detail) show_detail "$sub_arg" || true ;;
+      update) do_update || true ;;
+      uninstall) do_uninstall || true ;;
     esac
   done
   echo "Bye."
@@ -486,10 +566,9 @@ esac
 
 if [[ -n "$cmd" ]]; then
   case "$cmd" in
-    status|start|stop|restart|detail) : ;;
+    status|start|stop|restart|detail|update|uninstall) : ;;
     *)
       resolved_cmd=$(resolve_choice "$cmd" CMD_ALIAS "${CMDS[@]}") || {
-        echo "Gak ngerti command '$cmd'."
         show_help
         exit 1
       }
@@ -504,5 +583,7 @@ case "$cmd" in
   stop) do_stop "$arg" ;;
   restart) do_restart "$arg" ;;
   detail) show_detail "$arg" ;;
+  update) do_update ;;
+  uninstall) do_uninstall ;;
   "") repl ;;
 esac
