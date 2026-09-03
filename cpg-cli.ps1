@@ -509,6 +509,14 @@ function Invoke-Uninstall {
 
 # --- REPL (bare cpg, no args) ---------------------------------------------
 
+# Full-width divider re-queried every call, so it tracks a live terminal resize
+# instead of being baked in once at REPL start.
+function Get-Hr {
+  $width = $Host.UI.RawUI.WindowSize.Width
+  if (-not $width -or $width -lt 1) { $width = 40 }
+  return ("─" * $width)
+}
+
 function Show-Banner {
   Write-Host "╭─────────────────────────────────────╮" -ForegroundColor DarkYellow
   Write-Host -NoNewline "│ " -ForegroundColor DarkYellow
@@ -548,22 +556,32 @@ function Test-ForUpdate {
 
 function Start-Repl {
   $script:IsRepl = $true
+  try { $Host.UI.RawUI.WindowTitle = "✳  cpg-cli" } catch { }
   Show-Banner
   Test-ForUpdate
   Write-Host ""
   Show-Status ""
   while ($true) {
     Write-Host ""
-    # A framed input area, like Claude Code's own prompt box - just re-drawn fresh
-    # each turn (a real *pinned*, live-redrawing box needs raw-mode console reading,
-    # out of reach for a plain Read-Host). No inline vanish-on-type placeholder either
-    # - Read-Host has no hook to draw one that disappears the moment you type. This
-    # hint line is the safe equivalent.
-    Write-Host "─────────────────────────────────────" -ForegroundColor DarkGray
+    # A framed input area, like Claude Code's own prompt box - both borders are
+    # actually drawn (with a blank line reserved between them) BEFORE Read-Host
+    # starts, then the console cursor is walked back up onto that blank line.
+    # Read-Host only ever redraws its own current line, so the borders above and
+    # below stay put while typing - no raw-mode console-reading loop needed for that
+    # part. No inline vanish-on-type placeholder though - Read-Host has no hook to
+    # draw one that disappears the moment you type. The hint line above is the safe
+    # equivalent.
     Write-Host "contoh: /status, /start db, /detail, /help" -ForegroundColor DarkGray
+    Write-Host (Get-Hr) -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host (Get-Hr) -ForegroundColor DarkGray
+    try {
+      $pos = $Host.UI.RawUI.CursorPosition
+      $pos.Y = [Math]::Max(0, $pos.Y - 2)
+      $Host.UI.RawUI.CursorPosition = $pos
+    } catch { }
     Write-Host -NoNewline "❯ " -ForegroundColor DarkYellow
     $line = Read-Host
-    Write-Host "─────────────────────────────────────" -ForegroundColor DarkGray
     if ($null -eq $line) { break }
     $line = $line.TrimStart("/")
     if (-not $line.Trim()) { continue }

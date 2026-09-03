@@ -628,8 +628,18 @@ check_for_update() {
   fi
 }
 
+# Full-width divider re-queried every call, so it tracks a live terminal resize
+# instead of being baked in once at REPL start.
+hr() {
+  local width
+  width=$(tput cols 2>/dev/null) || width=40
+  printf '─%.0s' $(seq 1 "$width")
+  echo
+}
+
 repl() {
   IN_REPL=1
+  printf '\033]0;%s\007' "✳  cpg-cli" 2>/dev/null || true
   print_banner
   check_for_update
   echo
@@ -642,14 +652,20 @@ repl() {
   bind -x '"\t": _cpg_tab_complete' 2>/dev/null || true
   while true; do
     echo
-    # A framed input area, like Claude Code's own prompt box - just re-drawn fresh
-    # each turn (a real *pinned*, live-redrawing box needs raw-mode/curses, out of
-    # reach for a plain `read`). No inline vanish-on-type placeholder either - that
-    # needs readline to know about text it never put there itself, so backspace/arrow
-    # keys would visibly desync from what's actually in the edit buffer. This hint
-    # line is the safe equivalent.
-    echo "${C_DIM}─────────────────────────────────────${C_RESET}"
+    # A framed input area, like Claude Code's own prompt box - both borders are
+    # actually drawn (with a blank line reserved between them) BEFORE `read -e`
+    # starts, then the cursor is walked back up onto that blank line with `tput cuu`.
+    # `read -e`/readline only ever redraws its own current line, so the borders above
+    # and below stay put while typing - no raw-mode/curses input loop needed for that
+    # part. No inline vanish-on-type placeholder though - that needs readline to know
+    # about text it never put there itself, so backspace/arrow keys would visibly
+    # desync from what's actually in the edit buffer. The hint line above is the safe
+    # equivalent.
     echo "${C_DIM}contoh: /status, /start db, /detail, /help${C_RESET}"
+    echo "${C_DIM}$(hr)${C_RESET}"
+    echo
+    echo "${C_DIM}$(hr)${C_RESET}"
+    tput cuu 2 2>/dev/null || true
     # `-e` turns on readline for this read - without it, arrow keys just dump raw
     # escape bytes into the buffer (garbled input, cursor jumps around but doesn't
     # actually navigate). `history -s` after each line makes up/down arrow recall
@@ -658,7 +674,6 @@ repl() {
       echo
       break
     fi
-    echo "${C_DIM}─────────────────────────────────────${C_RESET}"
     [[ -n "${line// }" ]] && history -s "$line"
     line="${line#/}"
     [[ -z "$line" ]] && continue
