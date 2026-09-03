@@ -382,7 +382,11 @@ Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
 Scroll area output: Fn+↑ / Fn+↓ (setengah layar) atau Option+↑ / Option+↓ (3 baris).
 Ctrl+B / Ctrl+F juga bisa. Shift+↑/↓ kebind tapi Terminal.app nyimpen chord itu buat
 dirinya sendiri, jadi gak nyampe. Kotak input tetep di bawah, gak kegeser. Ngetik
-apa aja = balik ke output terbaru. Select/copy normal. CPG_ALTSCREEN=0 = layar biasa.
+apa aja = balik ke output terbaru. Select/copy normal.
+Scroll pakai mouse masih bisa nembus ke atas layar cpg (itu scrollback terminal,
+bukan punya cpg). Mau dibatesin: CPG_MOUSE=1 (wheel dipegang cpg, select jadi
+Option-drag) atau CPG_CLEAR_SCROLLBACK=1 (kosongin scrollback window pas start).
+CPG_ALTSCREEN=0 = balik ke layar biasa.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -911,6 +915,11 @@ _cpg_pinned_ok() {
 _cpg_alt_on() {
   [[ "${CPG_ALTSCREEN:-1}" != "0" ]] || return 0
   _CPG_ALT=1
+  # Terminal.app still lets the wheel reach the main screen's scrollback while an app
+  # is on the alternate one, so scrolling up can leave cpg's screen entirely. Wiping
+  # that scrollback (ESC[3J) stops it dead - but it also destroys whatever was in the
+  # window before cpg started, so it's opt-in, not the default.
+  [[ "${CPG_CLEAR_SCROLLBACK:-0}" != "0" ]] && printf '\033[H\033[2J\033[3J'
   printf '\033[?1049h'
 }
 
