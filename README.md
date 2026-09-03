@@ -14,21 +14,23 @@ segmentation) against the real thing locally, instead of mocking them.
 
 ## Install
 
-Gives you a `cpg` command usable from **any directory, any shell**.
+Gives you a `cpg` command usable from **any directory, any shell**. No
+`git clone` needed first - the one-liner does that for you (into
+`~/compose-playground` by default; override with `$COMPOSE_PLAYGROUND_DIR` /
+`$env:COMPOSE_PLAYGROUND_DIR` before running it).
 
-**Windows (PowerShell/cmd):**
+**Windows (PowerShell):**
 ```powershell
-git clone https://github.com/ndri-nr/compose-playground.git
-cd compose-playground
-./install.ps1
+irm https://raw.githubusercontent.com/ndri-nr/compose-playground/main/install-remote.ps1 | iex
 ```
 
 **Git Bash / Linux / macOS:**
 ```bash
-git clone https://github.com/ndri-nr/compose-playground.git
-cd compose-playground
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/ndri-nr/compose-playground/main/install-remote.sh | bash
 ```
+
+Already have the repo cloned? Just run `./install.sh` (or `./install.ps1`)
+from inside it instead - same result, skips the clone/pull step.
 
 Open a new terminal afterwards if the installer says it updated your PATH.
 Then from anywhere:
@@ -37,8 +39,9 @@ Then from anywhere:
 cpg
 ```
 
-Uninstalling: delete `cpg` / `cpg.cmd` from `~/.local/bin` and remove that
-folder from PATH if you added it just for this.
+Uninstalling: delete `cpg` / `cpg.cmd` from `~/.local/bin` (remove that folder
+from PATH if you added it just for this), then remove the cloned folder
+(`~/compose-playground` by default).
 
 ## The `cpg` CLI
 
