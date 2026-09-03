@@ -353,9 +353,9 @@ project compose terpisah (compose/<grup>.yml) - keliatan sbg baris sendiri2 di
 Usage:
   $0                    masuk interactive shell (prompt cpg>, ketik /status /start dst berulang)
   $0 status [grup]      liat status (semua grup, atau 1 grup doang)
-  $0 start  [grup] [--all]   nyalain grup (tanpa nama -> pilih dari yg belum full up)
+  $0 start  [grup] [--no-all]  nyalain grup (tanpa nama -> pilih dari yg belum full up)
   $0 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
-  $0 restart [grup] [--all]
+  $0 restart [grup] [--no-all]
   $0 detail [grup]      connection info (host/port/user/pass/URI) per service
   $0 update             git pull cpg-cli itself + refresh the cpg wrapper
   $0 uninstall          remove the cpg command (repo/containers/data untouched)
@@ -369,11 +369,11 @@ Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
 
---all (alias: -a, all, full, semua) nyalain service yang ada di balik compose
-profile juga: replica Postgres + pgpool (profile postgres-replica), replica set
-Mongo (mongo-cluster), 6 node Redis cluster (redis-cluster). Tanpa --all mereka
-gak kebikin - makanya status cuma ngitung yang beneran ada, dan nunjukin
-"+N profil" buat sisanya.
+start/restart default-nya nyalain SEMUA, termasuk yang di balik compose profile:
+replica Postgres + pgpool (profile postgres-replica), replica set Mongo
+(mongo-cluster), 6 node Redis cluster (redis-cluster). Mau yang inti doang:
+--no-all (alias: --core, --lean, --min). Yang dilewatin gak kebikin containernya,
+jadi status gak ngitung mereka - keliatan sbg "+N profil" di belakang list.
 EOF
 }
 
@@ -391,15 +391,22 @@ ensure_dependencies() {
   done
 }
 
-# Splits an "--all" style token out of a group list: sets ALL_FLAG and FLAG_REST
-# (globals, so the caller keeps the array - a command substitution would flatten it).
+# Splits the profile flag out of a group list: sets ALL_FLAG and FLAG_REST (globals,
+# so the caller keeps the array - a command substitution would flatten it).
+#
+# Profiles are ON by default: `cpg start db` brings up the replicas and cluster nodes
+# too, because a group that can't reach its own full member count is the confusing
+# case ("why is database 4/9?"). `--no-all` (aka --core/--lean/--min) is the opt-out
+# for when you only want the always-on services. `--all` is still accepted, it just
+# doesn't change anything now.
 _take_flags() {
   local w
-  ALL_FLAG=0
+  ALL_FLAG=1
   FLAG_REST=()
   for w in "$@"; do
     case "$w" in
       --all|-a|all|full|semua) ALL_FLAG=1 ;;
+      --no-all|--core|--lean|--min|core|lean|min|minimal) ALL_FLAG=0 ;;
       *) FLAG_REST+=("$w") ;;
     esac
   done
@@ -430,12 +437,12 @@ _start_one() {
   if ! dc "$group" start ${SVC_GROUPS[$group]}; then
     dc "$group" up -d
   fi
-  # Say it out loud, once, where it's actionable: a plain start leaves the
-  # profile-gated services (replicas, cluster nodes) untouched, so the group reads
-  # "up" without them and there's no other hint they exist.
+  # Only reachable via --no-all now, but say it out loud where it's actionable: this
+  # start deliberately left the profile-gated services (replicas, cluster nodes)
+  # alone, so the group will read "up" without them.
   group_scan "$group"
   if (( G_DORMANT > 0 )); then
-    echo "${C_DIM}  (+$G_DORMANT service di balik profile - 'cpg start $group --all' kalo mau ikut nyala)${C_RESET}"
+    echo "${C_DIM}  (+$G_DORMANT service di balik profile dilewatin - 'cpg start $group' tanpa --no-all buat nyalain semua)${C_RESET}"
   fi
 }
 
@@ -826,6 +833,7 @@ _CPG_BUF=""; _CPG_POS=0; _CPG_LINE=""
 _CPG_HIST=(); _CPG_CL=""; _CPG_CP=0; _CPG_CMATCH=()
 _CPG_WINCH=0
 _CPG_HINT="contoh: /status, /start db, /detail, /help"
+_CPG_LOG="" # mirror of everything printed into the pane, so a resize can repaint it
 
 # Single source of truth for the terminal's size, re-measured on demand.
 # `stty size` reads the window off stdin; `tput lines/cols` asks *stderr* on some
@@ -881,9 +889,43 @@ _cpg_region_off() {
 # renderer or anything else that resets the margins behind our back gets corrected
 # here. The leading newline scrolls one blank row in, which also separates each
 # command's output like the old prompt's blank line did.
+#
+# Output is also teed into $_CPG_LOG, and that mirror is what makes a resize
+# survivable: the emulator reflows the pane however it likes (Terminal.app keeps the
+# bottom and pushes everything up, stranding a copy of our box in the pane at every
+# step of a drag), and with no copy of the output the only choices are leaving that
+# mess on screen or wiping the pane. With one, a resize just repaints. The cost: the
+# pane is a pipe rather than a tty, so `docker compose` prints plain progress lines
+# instead of its live-redrawing ones.
 _cpg_out() {
-  printf '\033[1;%dr\033[%d;1H\n' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
-  "$@"
+  printf '\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
+  if [[ -z "$_CPG_LOG" ]]; then
+    printf '\n'
+    "$@"
+    return
+  fi
+  # Bounded: only the last screenful is ever replayed, so keep the tail and drop the
+  # rest once the file gets big.
+  if [[ -s "$_CPG_LOG" ]] && (( $(wc -c < "$_CPG_LOG") > 1048576 )); then
+    tail -n 500 "$_CPG_LOG" > "$_CPG_LOG.trim" 2>/dev/null && mv "$_CPG_LOG.trim" "$_CPG_LOG"
+  fi
+  # pipefail (set at the top of the script) keeps the command's own status instead of
+  # tee's, so `/exit` still reports "leave the REPL" through this.
+  { printf '\n'; "$@" 2>&1; } | tee -a "$_CPG_LOG"
+}
+
+# Wipes the screen and replays the last screenful of the mirror, ending at the scroll
+# region's bottom margin (where fresh output lands too). Used after a resize, once the
+# emulator has reflowed the pane and left our old box rows sitting in it.
+_cpg_repaint_pane() {
+  printf '\033[r\033[1;1H\033[0J\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
+  [[ -s "$_CPG_LOG" ]] || return 0
+  # Each line prints at the bottom margin and scrolls the previous ones up, so the
+  # replay ends exactly where the next command's output will continue from.
+  local line
+  while IFS= read -r line; do
+    printf '%s\n' "$line"
+  done < <(tail -n "$_CPG_BOTTOM" "$_CPG_LOG")
 }
 
 # Repaints the 4 pinned rows (hint, box top, input, box bottom) and parks the cursor
@@ -914,25 +956,17 @@ _cpg_render() {
 # there as leftover borders stacking under the new box - the emulator never says how
 # it reflowed, and nothing here mirrors the pane's content to repaint it. The output
 # isn't lost, it's one scroll up.
-# Re-measures and repaints only when the window really changed. The pane's content is
-# left exactly as the emulator reflowed it - wiping it (an earlier attempt did) reads
-# as "the resize cleared my screen", and nothing here mirrors the output to put it
-# back. Where the box used to sit is cleared as part of the repaint; Ctrl-L wipes the
-# pane if a reflow does leave something ugly behind.
+# Re-measures and repaints only when the window really changed.
 _cpg_poll_resize() {
   local pr=$_CPG_ROWS pc=$_CPG_COLS
   _cpg_term_size
   if (( pr == _CPG_ROWS && pc == _CPG_COLS )); then
     return 0
   fi
-  # Growing taller leaves the old box stranded in the middle of the (now taller)
-  # pane, with only blank rows below it - erase from there down. Shrinking doesn't
-  # need it: the emulator shifts the screen up by exactly the rows it dropped, so the
-  # old box lands on the new box's rows and the repaint covers it.
-  if (( _CPG_ROWS > pr && pr > 3 )); then
-    printf '\033[r\033[%d;1H\033[0J' $(( pr - 3 ))
-  fi
-  printf '\033[1;%dr\033[%d;1H' "$_CPG_BOTTOM" "$_CPG_BOTTOM"
+  # Don't try to patch up whatever the emulator did to the pane - wipe it and replay
+  # from the mirror. Terminal.app in particular keeps the bottom of the screen and
+  # pushes the rest up, so a drag leaves a stack of old hint lines and top borders.
+  _cpg_repaint_pane
   _cpg_render
 }
 
@@ -985,7 +1019,10 @@ _cpg_read_line() {
       $'\005') _CPG_POS=${#_CPG_BUF} ;;                 # Ctrl-E
       $'\013') _CPG_BUF="${_CPG_BUF:0:_CPG_POS}" ;;     # Ctrl-K
       $'\025') _CPG_BUF="${_CPG_BUF:_CPG_POS}"; _CPG_POS=0 ;; # Ctrl-U
-      $'\014') printf '\033[1;%dJ' "$_CPG_BOTTOM" ;;    # Ctrl-L: wipe the top pane only
+      $'\014') # Ctrl-L: wipe the pane, and the mirror with it - otherwise the next
+        # resize replays exactly what was just cleared.
+        [[ -n "$_CPG_LOG" ]] && : > "$_CPG_LOG"
+        printf '\033[1;%dJ' "$_CPG_BOTTOM" ;;
       $'\t')
         _CPG_CL="$_CPG_BUF"; _CPG_CP=$_CPG_POS
         _cpg_complete_core
@@ -1059,7 +1096,11 @@ _cpg_dispatch() {
   case "$sub_cmd" in
     exit|quit|q) return 1 ;;
     -h|--help|help) show_help; return 0 ;;
-    clear|cls) clear; print_banner; echo; print_status; return 0 ;;
+    clear|cls)
+      # The mirror goes too, same reason as Ctrl-L. (This runs inside _cpg_out's
+      # pipeline, so truncating the file works where a variable assignment wouldn't.)
+      [[ -n "$_CPG_LOG" ]] && : > "$_CPG_LOG"
+      clear; print_banner; echo; print_status; return 0 ;;
   esac
 
   if ! resolved_cmd=$(resolve_choice "$sub_cmd" CMD_ALIAS "${CMDS[@]}"); then
@@ -1095,7 +1136,8 @@ _cpg_run_line() {
 
 repl_pinned() {
   _cpg_term_size
-  trap '_cpg_region_off' EXIT
+  _CPG_LOG=$(mktemp -t cpg-pane 2>/dev/null) || _CPG_LOG=""
+  trap '_cpg_region_off; [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim"' EXIT
   trap '_CPG_WINCH=1' WINCH
   printf '\033[2J\033[H' # start clean so nothing straddles the pinned box
   _cpg_region_on
@@ -1109,6 +1151,7 @@ repl_pinned() {
     if ! _cpg_out _cpg_run_line "$line"; then break; fi
   done
   _cpg_region_off
+  [[ -n "$_CPG_LOG" ]] && rm -f "$_CPG_LOG" "$_CPG_LOG.trim"
   trap - EXIT WINCH
   echo "Bye."
 }

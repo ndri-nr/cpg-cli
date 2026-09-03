@@ -285,9 +285,9 @@ project compose terpisah (compose/<grup>.yml) - keliatan sbg baris sendiri2 di
 Usage:
   ./cpg-cli.ps1                    masuk interactive shell (prompt cpg>, ketik /status /start dst berulang)
   ./cpg-cli.ps1 status [grup]      liat status (semua grup, atau 1 grup doang)
-  ./cpg-cli.ps1 start  [grup] [--all]   nyalain grup (tanpa nama -> pilih dari yg belum full up)
+  ./cpg-cli.ps1 start  [grup] [--no-all]  nyalain grup (tanpa nama -> pilih dari yg belum full up)
   ./cpg-cli.ps1 stop   [grup]      matiin grup  (tanpa nama -> pilih dari yg lagi jalan)
-  ./cpg-cli.ps1 restart [grup] [--all]
+  ./cpg-cli.ps1 restart [grup] [--no-all]
   ./cpg-cli.ps1 detail [grup]      connection info (host/port/user/pass/URI) per service
   ./cpg-cli.ps1 update             git pull cpg-cli itself + refresh the cpg wrapper
   ./cpg-cli.ps1 uninstall          remove the cpg command (repo/containers/data untouched)
@@ -301,11 +301,11 @@ Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
 
---all (alias: -a, all, full, semua) nyalain service yang ada di balik compose
-profile juga: replica Postgres + pgpool (profile postgres-replica), replica set
-Mongo (mongo-cluster), 6 node Redis cluster (redis-cluster). Tanpa --all mereka
-gak kebikin - makanya status cuma ngitung yang beneran ada, dan nunjukin
-"+N profil" buat sisanya.
+start/restart default-nya nyalain SEMUA, termasuk yang di balik compose profile:
+replica Postgres + pgpool (profile postgres-replica), replica set Mongo
+(mongo-cluster), 6 node Redis cluster (redis-cluster). Mau yang inti doang:
+--no-all (alias: --core, --lean, --min). Yang dilewatin gak kebikin containernya,
+jadi status gak ngitung mereka - keliatan sbg "+N profil" di belakang list.
 "@
 }
 
@@ -322,12 +322,20 @@ function Ensure-Dependencies([string]$groupName) {
   }
 }
 
-# Splits an "--all" style token out of a group list -> @{ All = $bool; Rest = @() }.
+# Splits the profile flag out of a group list -> @{ All = $bool; Rest = @() }.
+#
+# Profiles are ON by default: `cpg start db` brings up the replicas and cluster nodes
+# too, because a group that can't reach its own full member count is the confusing
+# case ("why is database 4/9?"). `--no-all` (aka --core/--lean/--min) is the opt-out
+# for when you only want the always-on services. `--all` is still accepted, it just
+# doesn't change anything now.
 function Split-AllFlag([string[]]$words) {
-  $all = $false
+  $all = $true
   $rest = [System.Collections.Generic.List[string]]::new()
   foreach ($w in @($words | Where-Object { $_ })) {
-    if ($w -in @("--all", "-a", "all", "full", "semua")) { $all = $true } else { $rest.Add($w) }
+    if ($w -in @("--all", "-a", "all", "full", "semua")) { $all = $true }
+    elseif ($w -in @("--no-all", "--core", "--lean", "--min", "core", "lean", "min", "minimal")) { $all = $false }
+    else { $rest.Add($w) }
   }
   return @{ All = $all; Rest = @($rest) }
 }
@@ -358,12 +366,12 @@ function Invoke-StartOne([string]$groupName, [bool]$All = $false) {
   # `up -d` to actually create them.
   Invoke-Compose $groupName (@("start") + $svcs)
   if ($LASTEXITCODE -ne 0) { Invoke-Compose $groupName @("up", "-d") }
-  # Say it out loud, once, where it's actionable: a plain start leaves the
-  # profile-gated services (replicas, cluster nodes) untouched, so the group reads
-  # "up" without them and there's no other hint they exist.
+  # Only reachable via --no-all now, but say it out loud where it's actionable: this
+  # start deliberately left the profile-gated services (replicas, cluster nodes)
+  # alone, so the group will read "up" without them.
   $dormant = (Get-GroupState $groupName).Dormant
   if ($dormant -gt 0) {
-    Write-Host "  (+$dormant service di balik profile - 'cpg start $groupName --all' kalo mau ikut nyala)" -ForegroundColor DarkGray
+    Write-Host "  (+$dormant service di balik profile dilewatin - 'cpg start $groupName' tanpa --no-all buat nyalain semua)" -ForegroundColor DarkGray
   }
 }
 
@@ -879,13 +887,13 @@ function Read-PinnedLine {
       $pc = $script:PinnedCols
       Update-TermSize
       if ($pr -ne $script:PinnedRows -or $pc -ne $script:PinnedCols) {
-        # The pane's content is left exactly as the emulator reflowed it - wiping it
-        # (an earlier attempt did) reads as "the resize cleared my screen", and
-        # nothing here mirrors the output to put it back. Growing taller does strand
-        # the old box mid-pane with only blank rows below, so erase from there down;
-        # shrinking needs nothing, the screen shifts up by the rows it dropped and
-        # the old box lands where the repaint covers it. Ctrl-L wipes the pane if a
-        # reflow leaves something ugly behind.
+        # The pane is left as the emulator reflowed it. The bash side mirrors pane
+        # output to a file and replays it here, which is what lets it clean up an
+        # emulator that strands old box rows mid-pane (Terminal.app does); no such
+        # mirror here, because nearly every message in this script goes out through
+        # Write-Host, which bypasses the pipeline a tee would need. Growing taller
+        # does strand the old box with blank rows below it, so erase from there
+        # down; Ctrl-L wipes the pane if a reflow leaves something else behind.
         if ($script:PinnedRows -gt $pr -and $pr -gt 3) {
           Write-Vt "$($script:E)[r$($script:E)[$($pr - 3);1H$($script:E)[0J"
         }

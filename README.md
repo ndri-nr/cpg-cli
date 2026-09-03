@@ -90,13 +90,16 @@ macOS ships bash 3.2, so `brew install bash`). Anywhere it can't - piped
 input, a tiny window, Windows' legacy conhost, or `CPG_PINNED=0` if you just
 prefer it - the older per-turn prompt box is used instead, same commands.
 
-`--all` (aliases `-a`, `all`, `full`, `semua`) also brings up the services that
-sit behind a compose profile: the Postgres replicas + pgpool
-(`postgres-replica`), the Mongo replica set (`mongo-cluster`), the 6-node Redis
-cluster (`redis-cluster`). Without it those containers are never created - so
-the status counts only what actually exists and shows `+N profil` for the rest.
-That's why `database` reads `4/4  ... +5 profil` on a plain start instead of the
-old `4/9`, which no `cpg start db` could ever complete.
+`start`/`restart` bring up **everything** in a group, including the services
+behind a compose profile: the Postgres replicas + pgpool (`postgres-replica`),
+the Mongo replica set (`mongo-cluster`), the 6-node Redis cluster
+(`redis-cluster`). Want just the always-on ones? `--no-all` (aliases `--core`,
+`--lean`, `--min`).
+
+Whatever you skip is never created, and the status only counts containers that
+exist - the rest show up as `+N profil` after the member list. That's why a
+`--no-all` start of `database` reads `4/4 ... +5 profil` rather than the old
+`4/9`, a number no `cpg start db` could ever complete.
 
 (the full member list per group still lives in `/detail <group>` - the status
 view fits as many names as your current terminal width allows and shows
@@ -108,9 +111,9 @@ Or run one-shot from a normal shell:
 ```
 cpg status             # every group + running/total count, color-coded
 cpg status cache       # just one group
-cpg start [group...] [--all]   # no group -> pick from what's not fully up yet; takes several: `cpg start db ai messaging`
+cpg start [group...] [--no-all]   # no group -> pick from what's not fully up yet; takes several: `cpg start db ai messaging`
 cpg stop  [group...]   # no group -> pick from what's actually running; same multi-group support
-cpg restart [group...] [--all]
+cpg restart [group...] [--no-all]
 cpg detail [group]     # connection info per service: host/port/user/pass/URI
 cpg update             # git pull cpg-cli itself + refresh the cpg wrapper (auto-restarts the shell if run from inside it)
 cpg uninstall          # remove the cpg command (repo/containers/data untouched)
