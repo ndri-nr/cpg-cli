@@ -91,10 +91,19 @@ far up you are. Resizing re-cuts and repaints live, re-fitting the status lines.
 
 No mouse tracking is enabled, on purpose: that would take plain drags away from
 the terminal and break text selection. So select and copy work as they do
-anywhere else, and the wheel simply does nothing here. On exit the session's
-output is handed to the real scrollback, so leaving doesn't throw it away.
-`CPG_ALTSCREEN=0` stays on the normal screen instead (the wheel scrolls the
-window again, and takes the box with it).
+anywhere else. On exit the session's output is handed to the real scrollback, so
+leaving doesn't throw it away.
+
+The wheel still scrolls the terminal's own view, which means it can scroll past
+cpg's screen into whatever was in the window before it. Two opt-ins stop that,
+neither free: `CPG_CLEAR_SCROLLBACK=1` wipes the window's scrollback at startup
+(nothing above to scroll to - and whatever was there is gone for good), or
+`CPG_MOUSE=1` hands the wheel to cpg (it scrolls the pane, but selecting text
+then needs Option-drag). `CPG_ALTSCREEN=0` stays on the normal screen instead.
+
+`cpg-cli.ps1` has all of this too: the alternate screen, the pinned box, the
+mirror, Fn/Option/Shift+arrows and Ctrl+B/F, the resize re-fit. It's verified
+against PowerShell 7 on macOS; Windows Terminal still wants a manual pass.
 
 Line editing is ours rather than readline's: left/right, Home/End,
 backspace/delete, up/down history, Tab completion, Ctrl-A/E/U/K, Ctrl-L to wipe

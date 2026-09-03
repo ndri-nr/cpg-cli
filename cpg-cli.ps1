@@ -98,9 +98,63 @@ $CmdAlias = @{
 }
 $Cmds = @("status", "start", "stop", "restart", "detail", "update", "uninstall")
 
+# --- pane output ------------------------------------------------------------
+#
+# Everything the shell prints has to be mirrored to a file, because that mirror is
+# what a resize or a scroll repaints the pane from. Rather than rewrite ~70 call
+# sites, this shadows the Write-Host cmdlet: same calls, same colours, but the text
+# is written as VT (so the mirror holds exactly what the screen holds) and appended
+# to $script:PaneLog. Outside the live prompt it just writes, same as before.
+$script:PaneLog = ""
+# Colour goes out as VT codes now, so it has to be suppressed when output isn't a
+# terminal - otherwise `cpg status | grep` would be reading escape sequences.
+$script:OutRedirected = $false
+try { $script:OutRedirected = [Console]::IsOutputRedirected } catch { }
+$script:VtColor = @{
+  Green = "32"; Yellow = "33"; Red = "31"; DarkYellow = "38;5;209"
+  DarkGray = "2"; Gray = "37"; White = "97"; Cyan = "36"; Blue = "34"; Magenta = "35"
+  DarkGreen = "32"; DarkRed = "31"; DarkCyan = "36"; DarkBlue = "34"; DarkMagenta = "35"
+}
+
+function Write-Host {
+  [CmdletBinding()]
+  param(
+    [Parameter(Position = 0, ValueFromPipeline = $true, ValueFromRemainingArguments = $true)]
+    [object[]]$Object,
+    [switch]$NoNewline,
+    [object]$Separator = " ",
+    [object]$ForegroundColor,
+    [object]$BackgroundColor
+  )
+  process {
+    $text = if ($null -eq $Object) { "" } else { ($Object | ForEach-Object { "$_" }) -join $Separator }
+    if ($ForegroundColor -and -not $script:OutRedirected) {
+      $code = $script:VtColor["$ForegroundColor"]
+      if ($code) { $text = "$([char]27)[$($code)m$text$([char]27)[0m" }
+    }
+    if (-not $NoNewline) { $text += "`r`n" }
+    [Console]::Out.Write($text)
+    if ($script:PaneLog) {
+      try { [System.IO.File]::AppendAllText($script:PaneLog, $text) } catch { }
+    }
+  }
+}
+
 function Invoke-Compose {
-  param([string]$GroupName, [string[]]$Rest)
-  docker compose -f $GroupFile[$GroupName] @Rest
+  param([string]$GroupName, [string[]]$Rest, [switch]$Capture)
+  # -Capture: the caller wants the text back (status queries), so return it and print
+  # nothing. Otherwise the output belongs on screen, and it goes through the writer
+  # so it reaches the mirror a repaint replays from. Cost of that: stdout is a pipe,
+  # so compose prints plain progress lines instead of live-redrawing ones.
+  # $LASTEXITCODE still comes from docker either way.
+  if ($Capture) {
+    return (docker compose -f $GroupFile[$GroupName] @Rest)
+  }
+  if ($script:PaneLog) {
+    & docker compose -f $GroupFile[$GroupName] @Rest 2>&1 | ForEach-Object { Write-Host "$_" }
+  } else {
+    docker compose -f $GroupFile[$GroupName] @Rest
+  }
 }
 
 # --- fuzzy matching --------------------------------------------------------
@@ -165,7 +219,7 @@ function Resolve-GroupOrDie([string]$val) {
 # --- status helpers ---------------------------------------------------------
 
 function Get-RunningServicesOf([string]$groupName) {
-  (Invoke-Compose $groupName @("ps", "--services", "--status", "running") 2>$null) -split "`n" | Where-Object { $_ -ne "" }
+  (Invoke-Compose $groupName @("ps", "--services", "--status", "running") -Capture 2>$null) -split "`n" | Where-Object { $_ -ne "" }
 }
 
 function Test-NetworkExists([string]$groupName) {
@@ -178,7 +232,7 @@ function Test-NetworkExists([string]$groupName) {
 # switched on at some point, which is what the denominator below keys off.
 function Get-GroupPs([string]$groupName) {
   $map = @{}
-  $lines = (Invoke-Compose $groupName @("ps", "-a", "--format", "{{.Service}} {{.State}}") 2>$null) -split "`n"
+  $lines = (Invoke-Compose $groupName @("ps", "-a", "--format", "{{.Service}} {{.State}}") -Capture 2>$null) -split "`n"
   foreach ($line in $lines) {
     $parts = $line.Trim() -split '\s+', 2
     if ($parts[0]) { $map[$parts[0]] = if ($parts.Count -gt 1) { $parts[1] } else { "" } }
@@ -209,19 +263,26 @@ function Get-GroupState($groupName) {
   [PSCustomObject]@{ Group = $groupName; Running = $running; Total = $total; State = $st; Services = $active; Dormant = $dormant }
 }
 
-function Write-GroupLine($info) {
-  $color = switch ($info.State) { "up" { "Green" }; "partial" { "Yellow" }; "down" { "Red" } }
-  $plainPrefix = "  ● {0,-15}{1,2}/{2,-2}  " -f $info.Group, $info.Running, $info.Total
-  Write-Host -NoNewline "  ● " -ForegroundColor $color
-  Write-Host -NoNewline ("{0,-15}" -f $info.Group)
-  Write-Host -NoNewline -ForegroundColor $color ("{0,2}/{1,-2}  " -f $info.Running, $info.Total)
+# One status line as a string, fitted to the CURRENT width. A string rather than a
+# series of Write-Hosts because the resize/scroll repaint has to re-render the same
+# line at a new width instead of replaying text laid out for the old one.
+function Get-GroupLineText($info) {
+  $e = [char]27
+  $code = switch ($info.State) { "up" { "32" }; "partial" { "33" }; "down" { "31" } }
+  if ($script:OutRedirected) {
+    # Plain text when piped: same layout, no escapes.
+    return ("  ● {0}{1}  {2}" -f ("{0,-15}" -f $info.Group), ("{0,2}/{1,-2}" -f $info.Running, $info.Total), (Get-GroupServiceText $info))
+  }
+  return ("  {0}●{1} {2}{0}{3}{1}  {4}{5}{1}" -f `
+    "$e[$($code)m", "$e[0m", ("{0,-15}" -f $info.Group), `
+    ("{0,2}/{1,-2}" -f $info.Running, $info.Total), "$e[2m", (Get-GroupServiceText $info))
+}
 
-  # Full member list lives in `/detail <group>` - showing all of them here made the
-  # line unreadably wide on anything but a maximized terminal. Fit as many names as
-  # actually fit the current terminal width, "+N lainnya" for the rest - re-measured
-  # every render, so it re-flows on the next redraw after a resize (this isn't a live
-  # mid-resize repaint either - see Get-Hr).
-  $width = $Host.UI.RawUI.WindowSize.Width
+# The member list for one status line, fitted to the current width: as many names as
+# fit, "+N lainnya" for the rest, "+N profil" for the profile-gated ones.
+function Get-GroupServiceText($info) {
+  $plainPrefix = "  ● {0,-15}{1,2}/{2,-2}  " -f $info.Group, $info.Running, $info.Total
+  $width = $script:PinnedCols
   if (-not $width -or $width -lt 1) { $width = 80 }
   # "+N profil" = services waiting behind a compose profile (see Get-GroupState).
   # Kept out of the counts on purpose, but worth advertising - that's the
@@ -249,7 +310,13 @@ function Write-GroupLine($info) {
     $remaining = $info.Services.Count - $shown.Count
     if ($remaining -gt 0) { $svcText += ", +$remaining lainnya" }
   }
-  Write-Host ($svcText + $dormantNote) -ForegroundColor DarkGray
+  return ($svcText + $dormantNote)
+}
+
+function Write-GroupLine($info) {
+  # Remembered per group so a repaint can re-fit the line without asking docker.
+  $script:LastStatus[$info.Group] = $info
+  Write-Host (Get-GroupLineText $info)
 }
 
 function Show-Status([string]$filter) {
@@ -297,6 +364,10 @@ Grup: $($SvcGroups.Keys -join ', ')
 Boleh ketik alias/singkatan juga, misal: db, redis, rabbit, obs, sonar, chroma, up, down.
 Typo dikit juga ketauan - bakal ditanya "maksud lu ini?" kalo mirip.
 Di dalem shell interaktif, Tab bisa buat autocomplete command & nama grup.
+Scroll area output: Fn+↑ / Fn+↓ (setengah layar), Option/Shift+↑ / ↓ (3 baris), atau
+Ctrl+B / Ctrl+F (satu layar). Kotak input tetep di bawah, gak kegeser. Ngetik apa
+aja = balik ke output terbaru. Select/copy normal. CPG_CLEAR_SCROLLBACK=1 kalo mau
+scroll mouse gak bisa nembus ke atas layar cpg. CPG_ALTSCREEN=0 = layar biasa.
 
 Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
@@ -617,8 +688,9 @@ function Invoke-Update {
     if ($script:IsRepl) {
       Write-Host "Restarting cpg..." -ForegroundColor DarkGray
       # The relaunch + `exit` below never unwinds Start-ReplPinned's finally block,
-      # so the scroll region has to be released by hand here.
+      # so the scroll region and the alternate screen are released by hand here.
       Disable-PinnedRegion
+      Disable-AltScreen
       & $PSCommandPath
       exit
     }
@@ -755,6 +827,9 @@ $script:PinnedReserved = 4 # hint + box top + input line + box bottom
 $script:PinnedHint = "contoh: /status, /start db, /detail, /help"
 $script:CpgHistory = @()
 $script:PaneEmpty = $true # fresh/just-cleared pane fills from the top, not the bottom
+$script:AltOn = $false
+$script:Scroll = 0        # lines the pane is scrolled back from the newest output
+$script:LastStatus = @{}  # group -> last Get-GroupState, for re-fitting on repaint
 $script:ReplQuit = $false
 $script:E = [char]27
 
@@ -795,6 +870,38 @@ function Test-PinnedSupport {
   return ($script:PinnedRows -ge 10 -and $script:PinnedCols -ge 24)
 }
 
+# The alternate screen is what makes the box unmovable: with no scrollback of its
+# own there is nothing to scroll it out of view, and looking back through output is
+# Option/Fn+arrows instead, repainted from the mirror. No mouse tracking is armed -
+# that would take drags away from the terminal and break text selection.
+function Enable-AltScreen {
+  if ($env:CPG_ALTSCREEN -eq "0") { return }
+  $script:AltOn = $true
+  # The wheel can still reach the main screen's scrollback in some terminals, so
+  # scrolling up can leave cpg's screen. CPG_CLEAR_SCROLLBACK=1 wipes that
+  # scrollback and stops it dead - opt-in, because it destroys what was in the
+  # window before cpg started.
+  if ($env:CPG_CLEAR_SCROLLBACK -and $env:CPG_CLEAR_SCROLLBACK -ne "0") {
+    Write-Vt "$($script:E)[H$($script:E)[2J$($script:E)[3J"
+  }
+  Write-Vt "$($script:E)[?1049h"
+}
+
+# MUST run before leaving (finally block, and before Invoke-Update relaunches): back
+# to the main screen, with the session's output handed to the real scrollback so
+# leaving doesn't throw it away.
+function Disable-AltScreen {
+  if (-not $script:AltOn) { return }
+  $script:AltOn = $false
+  Write-Vt "$($script:E)[?1049l"
+  if ($script:PaneLog -and (Test-Path $script:PaneLog)) {
+    try {
+      $tail = Get-Content -LiteralPath $script:PaneLog -Tail 500 -ErrorAction Stop
+      foreach ($line in $tail) { [Console]::Out.Write("$line`r`n") }
+    } catch { }
+  }
+}
+
 function Enable-PinnedRegion {
   $script:PinnedOn = $true
   # DECSTBM homes the cursor, hence the explicit move back down into the region.
@@ -818,6 +925,7 @@ function Disable-PinnedRegion {
 # here (DECSTBM homes the cursor, hence the restore right after it). The blank
 # separator row is skipped while the pane is still empty.
 function Enter-Pane {
+  Reset-Scroll
   $out = "$($script:E)[1;$($script:PinnedBottom)r$($script:E)8"
   if (-not $script:PaneEmpty) { $out += "`r`n" }
   Write-Vt $out
@@ -828,6 +936,105 @@ function Enter-Pane {
 function Save-PaneCursor {
   $script:PaneEmpty = $false
   Write-Vt "$($script:E)7"
+}
+
+# Strips the colour escapes off a line, so it can be measured and matched.
+function Get-PlainText([string]$text) {
+  return ($text -replace "$([char]27)\[[0-9;]*[A-Za-z]", "")
+}
+
+# How many screen rows a line takes: wider than the terminal means it wraps.
+function Get-LineRows([string]$text) {
+  $len = (Get-PlainText $text).Length
+  $h = [Math]::Ceiling($len / [double]$script:PinnedCols)
+  if ($h -lt 1) { $h = 1 }
+  return [int]$h
+}
+
+# A replayed status line was laid out for the width it was printed at, so re-render
+# it from the remembered snapshot instead: same fit-as-many logic, current width,
+# still exactly one row. Everything else replays as-is.
+function Get-RefittedLine([string]$line) {
+  $plain = Get-PlainText $line
+  if ($plain -match '^\s+●\s+([a-z][a-z-]*)\s') {
+    $info = $script:LastStatus[$Matches[1]]
+    if ($info) { return (Get-GroupLineText $info) }
+  }
+  return $line
+}
+
+# Wipes the pane and replays a screenful of the mirror, $script:Scroll lines back
+# from the newest output. Rows are counted, not lines: a screenful containing a
+# wrapped line needs more rows than the pane has, and the overflow would scroll the
+# top line out of view.
+function Repaint-Pane {
+  $e = $script:E
+  Write-Vt "$e[r$e[1;1H$e[0J$e[1;$($script:PinnedBottom)r$e[1;1H"
+  if (-not $script:PaneLog -or -not (Test-Path $script:PaneLog)) {
+    Write-Vt "$e`7"
+    return
+  }
+  $all = @(Get-Content -LiteralPath $script:PaneLog -ErrorAction SilentlyContinue)
+  if ($all.Count -eq 0) {
+    Write-Vt "$e`7"
+    return
+  }
+  $end = $all.Count - $script:Scroll
+  if ($end -lt 1) { $end = 1 }
+  $from = [Math]::Max(0, $end - ($script:PinnedBottom * 2))
+  $cand = @()
+  for ($i = $from; $i -lt $end; $i++) { $cand += (Get-RefittedLine $all[$i]) }
+
+  $rows = 0
+  $start = $cand.Count
+  for ($i = $cand.Count - 1; $i -ge 0; $i--) {
+    $h = Get-LineRows $cand[$i]
+    if ($rows + $h -gt $script:PinnedBottom) { break }
+    $rows += $h
+    $start = $i
+  }
+  $out = ""
+  for ($i = $start; $i -lt $cand.Count; $i++) {
+    if ($i -gt $start) { $out += "`r`n" }
+    $out += $cand[$i]
+  }
+  # DECSC hands the position back to Enter-Pane for the next command.
+  Write-Vt ($out + "$e`7")
+  $script:PaneEmpty = $false
+}
+
+# Furthest scroll offset that still fills the pane, counted in lines but measured in
+# rows - so the oldest output is actually reachable even when lines wrap.
+function Get-ScrollMax {
+  if (-not $script:PaneLog -or -not (Test-Path $script:PaneLog)) { return 0 }
+  $all = @(Get-Content -LiteralPath $script:PaneLog -ErrorAction SilentlyContinue)
+  if ($all.Count -eq 0) { return 0 }
+  $rows = 0
+  $k = 0
+  foreach ($line in $all) {
+    $h = Get-LineRows $line
+    if ($rows + $h -gt $script:PinnedBottom) { break }
+    $rows += $h
+    $k++
+  }
+  if ($k -lt 1) { $k = 1 }
+  return [Math]::Max(0, $all.Count - $k)
+}
+
+function Move-Scroll([int]$delta) {
+  $max = Get-ScrollMax
+  $want = $script:Scroll + $delta
+  if ($want -lt 0) { $want = 0 }
+  if ($want -gt $max) { $want = $max }
+  if ($want -eq $script:Scroll) { return }
+  $script:Scroll = $want
+  Repaint-Pane
+}
+
+function Reset-Scroll {
+  if ($script:Scroll -eq 0) { return }
+  $script:Scroll = 0
+  Repaint-Pane
 }
 
 # Repaints the 4 pinned rows and parks the cursor inside the box. Long input scrolls
@@ -845,6 +1052,9 @@ function Show-PinnedPrompt([string]$buf, [int]$pos) {
     $view = $buf.Substring($start, [Math]::Min($avail, $buf.Length - $start))
   }
   $hint = $script:PinnedHint
+  if ($script:Scroll -gt 0) {
+    $hint = "↑ $($script:Scroll) baris · Fn/Option+↓ buat balik, atau langsung ngetik"
+  }
   if ($hint.Length -gt $cols) { $hint = $hint.Substring(0, $cols) }
   $bar = "─" * [Math]::Max(1, $cols - 2)
   $dim = "$e[2m"
@@ -904,26 +1114,25 @@ function Read-PinnedLine {
       $pc = $script:PinnedCols
       Update-TermSize
       if ($pr -ne $script:PinnedRows -or $pc -ne $script:PinnedCols) {
-        # The pane is left as the emulator reflowed it. The bash side mirrors pane
-        # output to a file and replays it here, which is what lets it clean up an
-        # emulator that strands old box rows mid-pane (Terminal.app does); no such
-        # mirror here, because nearly every message in this script goes out through
-        # Write-Host, which bypasses the pipeline a tee would need. Growing taller
-        # does strand the old box with blank rows below it, so erase from there
-        # down; Ctrl-L wipes the pane if a reflow leaves something else behind.
-        if ($script:PinnedRows -gt $pr -and $pr -gt 3) {
-          Write-Vt "$($script:E)[r$($script:E)[$($pr - 3);1H$($script:E)[0J"
-        }
-        # The saved pane cursor is an absolute row, so a resize makes it stale -
-        # re-anchor it at the region's bottom margin (where output would land anyway
-        # on a full pane) rather than risk restoring into the box's rows.
-        Write-Vt "$($script:E)[1;$($script:PinnedBottom)r$($script:E)[$($script:PinnedBottom);1H$($script:E)7"
-        $script:PaneEmpty = $false
+        # Don't try to patch up however the emulator reflowed the pane - wipe it and
+        # replay from the mirror at the new width, status lines re-fitted.
+        Repaint-Pane
         Show-PinnedPrompt $buf $pos
       }
     }
     $k = [Console]::ReadKey($true)
     $ctrl = ($k.Modifiers -band [ConsoleModifiers]::Control) -ne 0
+    $shift = ($k.Modifiers -band [ConsoleModifiers]::Shift) -ne 0
+    $alt = ($k.Modifiers -band [ConsoleModifiers]::Alt) -ne 0
+    # Scrolling the pane: Option/Alt or Shift with the arrows (3 lines), Fn+arrows
+    # i.e. PageUp/PageDown (half a screen), Ctrl-B/Ctrl-F (a screen). The box itself
+    # never moves - it lives outside the scroll region.
+    if (($alt -or $shift) -and $k.Key -eq "UpArrow") { Move-Scroll 3; Show-PinnedPrompt $buf $pos; continue }
+    if (($alt -or $shift) -and $k.Key -eq "DownArrow") { Move-Scroll -3; Show-PinnedPrompt $buf $pos; continue }
+    if ($k.Key -eq "PageUp") { Move-Scroll ([int][Math]::Floor($script:PinnedBottom / 2)); Show-PinnedPrompt $buf $pos; continue }
+    if ($k.Key -eq "PageDown") { Move-Scroll (-[int][Math]::Floor($script:PinnedBottom / 2)); Show-PinnedPrompt $buf $pos; continue }
+    if ($ctrl -and $k.Key -eq "B") { Move-Scroll ($script:PinnedBottom - 2); Show-PinnedPrompt $buf $pos; continue }
+    if ($ctrl -and $k.Key -eq "F") { Move-Scroll (-($script:PinnedBottom - 2)); Show-PinnedPrompt $buf $pos; continue }
     switch ($k.Key) {
       "Enter" { return $buf }
       "Backspace" {
@@ -940,6 +1149,7 @@ function Read-PinnedLine {
       "Home" { $pos = 0 }
       "End" { $pos = $buf.Length }
       "UpArrow" {
+        Reset-Scroll
         if ($hidx -gt 0) {
           if ($hidx -eq $script:CpgHistory.Count) { $saved = $buf }
           $hidx--
@@ -948,6 +1158,7 @@ function Read-PinnedLine {
         }
       }
       "DownArrow" {
+        Reset-Scroll
         if ($hidx -lt $script:CpgHistory.Count) {
           $hidx++
           if ($hidx -eq $script:CpgHistory.Count) {
@@ -963,6 +1174,7 @@ function Read-PinnedLine {
         $pos = 0
       }
       "Tab" {
+        Reset-Scroll
         $r = Complete-CpgLine $buf $pos
         $buf = $r.Line
         $pos = $r.Point
@@ -985,13 +1197,17 @@ function Read-PinnedLine {
             }
             "K" { $buf = $buf.Substring(0, $pos) }
             "L" {
-              # Wipe the pane and send the pane cursor back to the top, so the next
-              # command's output starts there.
+              # Wipe the pane, and the mirror with it - otherwise the next resize or
+              # scroll replays exactly what was just cleared.
+              if ($script:PaneLog) { try { Set-Content -LiteralPath $script:PaneLog -Value "" -NoNewline } catch { } }
+              $script:Scroll = 0
               Write-Vt "$($script:E)[1;1H$($script:E)[0J$($script:E)7"
               $script:PaneEmpty = $true
             }
           }
         } elseif ($k.KeyChar -ne [char]0 -and -not [Char]::IsControl($k.KeyChar)) {
+          # Typing means you're done reading back.
+          Reset-Scroll
           $buf = $buf.Insert($pos, $k.KeyChar)
           $pos++
         }
@@ -1034,7 +1250,10 @@ function Invoke-ReplLine([string]$line) {
   if ($subCmd -in @("clear", "cls")) {
     # Pane cursor back to the top, so the banner lands there instead of at the
     # bottom margin (pinned mode only - Clear-Host is enough on its own otherwise).
+    # The mirror goes too, or the next scroll/resize replays what was just cleared.
     $script:PaneEmpty = $true
+    $script:Scroll = 0
+    if ($script:PaneLog) { try { Set-Content -LiteralPath $script:PaneLog -Value "" -NoNewline } catch { } }
     Clear-Host
     Show-Banner
     Write-Host ""
@@ -1063,9 +1282,11 @@ function Start-ReplPinned {
   $prevCtrlC = $false
   try { $prevCtrlC = [Console]::TreatControlCAsInput } catch { }
   try {
+    $script:PaneLog = [System.IO.Path]::GetTempFileName()
     # Ctrl-C as a *signal* could kill the process mid-region and leave the terminal
     # only scrolling its top rows; as input it's just another key to handle.
     try { [Console]::TreatControlCAsInput = $true } catch { }
+    Enable-AltScreen
     # Start clean, with the pane cursor seeded at the top of the screen.
     Write-Vt "$($script:E)[2J$($script:E)[H$($script:E)7"
     $script:PaneEmpty = $true
@@ -1089,6 +1310,11 @@ function Start-ReplPinned {
     }
   } finally {
     Disable-PinnedRegion
+    Disable-AltScreen
+    if ($script:PaneLog) {
+      try { Remove-Item -LiteralPath $script:PaneLog -Force -ErrorAction SilentlyContinue } catch { }
+      $script:PaneLog = ""
+    }
     try { [Console]::TreatControlCAsInput = $prevCtrlC } catch { }
   }
   Write-Host "Bye."
