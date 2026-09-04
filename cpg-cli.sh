@@ -679,6 +679,14 @@ mongo-replica-1 / mongo-replica-2  (profile: mongo-cluster)
 mongo-express  (web UI for mongo-primary)
   url: http://localhost:8888
   basic auth login: admin / admin   <- NOT the same as mongo's creds above
+  [container] konek cuma ke mongo-primary, GAK cluster-aware (ME_CONFIG_MONGODB_SERVER
+    di-set ke satu host doang) - dan gak bisa gampang dibikin cluster-aware: replica
+    set member ini self-announce sbg 127.0.0.1 (trik biar kebuka dari Windows host),
+    jadi kalo mongo-express (atau container lain) nyoba connect pake replicaSet=rs0,
+    discovery-nya nyasar connect ke DIRINYA SENDIRI (udah dicoba: MongoNetworkError
+    ECONNREFUSED 127.0.0.1:27017). Gapapa sih - primary punya semua data (replica
+    cuma mirror), browsing tetep lengkap. Mau cek replica spesifik? mongosh langsung:
+    mongosh "mongodb://admin:password@localhost:27019"   (ganti 27020 buat replica-2)
 EOF
       ;;
     cache)
@@ -703,6 +711,13 @@ redis-cluster-1..6  (profile: redis-cluster)
   cli:   redis-cli -c -h localhost -p 17001 -a password  (-c follows MOVED redirects)
   seed uri: redis://:password@localhost:17001   (client harus cluster-aware buat
     ngikutin MOVED ke node lain - satu seed URI ini gak cukup buat client biasa)
+  [container] nambahin ke redis-insight: JANGAN pilih tipe "Cluster" - node-node ini
+    self-announce sbg 127.0.0.1 (trik biar kebuka dari Windows host), jadi discovery
+    cluster-mode dari container lain nyasar connect ke dirinya sendiri (udah dicoba,
+    ECONNREFUSED). Tambahin tiap node satu2 sbg koneksi "Standalone" biasa: semua 6
+    node numpang network redis-cluster-1 (network_mode: service:redis-cluster-1),
+    jadi host-nya SAMA buat semua - host=redis-cluster-1, port=17001 (ulangi utk
+    17002..17006), pass=password.
   ports geser dari 7000-7005 - macOS AirPlay Receiver nempatin 7000 & 5000
 EOF
       ;;
