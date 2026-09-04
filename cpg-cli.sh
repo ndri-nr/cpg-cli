@@ -949,8 +949,19 @@ _cpg_term_size() {
 
 # Pinned mode needs a real terminal it can measure and address with escapes.
 # CPG_PINNED=0 is the escape hatch if some emulator renders it wrong.
+#
+# Confirmed broken on mintty (Git for Windows' own console window, as opposed to
+# Git Bash run inside Windows Terminal or VS Code's integrated terminal): any resize
+# wipes the alt-screen content and only the input box survives - a real bug, not
+# just cosmetic, and one that can't be fixed blindly from here (DECSTBM + altscreen
+# interaction on a terminal nobody's verified against, see
+# docs/pinned-bottom-input-plan.md). Off there by default until someone can actually
+# test a fix against it; CPG_PINNED=1 forces it back on for that.
 _cpg_pinned_ok() {
   [[ "${CPG_PINNED:-1}" != "0" ]] || return 1
+  if [[ -z "${CPG_PINNED:-}" && -n "${MSYSTEM:-}" && -z "${WT_SESSION:-}" && "${TERM_PROGRAM:-}" != "vscode" ]]; then
+    return 1 # bare mintty, opted out by default (see above)
+  fi
   [[ -t 0 && -t 1 ]] || return 1
   [[ "${TERM:-dumb}" != "dumb" ]] || return 1
   _cpg_term_size

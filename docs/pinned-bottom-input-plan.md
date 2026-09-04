@@ -122,5 +122,25 @@ bash/ps1, no runtime tambahan. Yang beneran ke-implement:
 
 Diuji dengan pty + emulator terminal (pyte): bash 5.3 dan PowerShell 7.4 di macOS -
 layout, tab, history, resize 24x80 -> 30x100, exit + restore region semua bener.
-Yang BELUM diuji dan masih perlu dicoba manual: Git Bash / WSL, Windows Terminal,
-conhost lama, xterm asli di Linux.
+Yang BELUM diuji dan masih perlu dicoba manual: WSL, Windows Terminal, conhost lama,
+xterm asli di Linux.
+
+## Update: mintty (Git Bash bawaan) - confirmed broken
+
+Dilaporkan user: di mintty (window default pas buka "Git Bash" dari Start Menu -
+beda dari Git Bash yang dijalanin di dalem Windows Terminal atau VS Code), tiap
+resize (baik diperbesar maupun diperkecil) langsung ngilangin seluruh isi pane,
+nyisain cuma kotak input doang. Root cause belum dikonfirmasi persis (dugaan kuat:
+mintty reset/wipe alt-screen buffer-nya sendiri pas resize, duluan sebelum
+`_cpg_poll_resize` sempet repaint dari mirror `$_CPG_LOG`) - butuh akses ke mintty
+beneran buat verify, gak bisa dari sandbox.
+
+Fix sementara (`_cpg_pinned_ok` di `cpg-cli.sh`): pinned mode di-off-in default
+khusus di mintty (dideteksi: `$MSYSTEM` keset, `$WT_SESSION` kosong, `$TERM_PROGRAM`
+bukan `vscode`) - jatuh ke `repl_classic` (boxed per-turn, reflow tiap Enter, udah
+battle-tested). `CPG_PINNED=1` maksa nyalain lagi kalo mau bantu debug/verify fix
+beneran. `cpg-cli.ps1`'s pinned mode uses the exact same alt-screen+DECSTBM
+mechanism (ported later, same commit family) - it just hasn't shown this bug on
+whatever terminal it's been tested against so far (Windows Terminal, presumably;
+conhost proper can't do VT anyway and already falls back). No mintty-equivalent
+opt-out added there yet - nothing to fall back from was reported broken.
