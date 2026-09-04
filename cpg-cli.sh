@@ -646,21 +646,26 @@ postgres  (master, read/write, always on)
   host: localhost   port: 5432   user: admin   pass: password   db: sample
   psql:  psql -h localhost -p 5432 -U admin -d sample
   jdbc:  jdbc:postgresql://localhost:5432/sample
+  uri:   postgresql://admin:password@localhost:5432/sample
 
 postgres-replica-1  (read-only standby, profile: postgres-replica)
   host: localhost   port: 5443   user: admin   pass: password   db: sample
+  uri:   postgresql://admin:password@localhost:5443/sample
 
 postgres-replica-2  (read-only standby, profile: postgres-replica)
   host: localhost   port: 5444   user: admin   pass: password   db: sample
+  uri:   postgresql://admin:password@localhost:5444/sample
 
 pgpool  (round-robin read routing across replicas, writes -> master, profile: postgres-replica)
   host: localhost   port: 5433   user: admin   pass: password   db: sample
   psql:  psql -h localhost -p 5433 -U admin -d sample
+  uri:   postgresql://admin:password@localhost:5433/sample
   admin UI login: admin / password
 
 timescaledb
   host: localhost   port: 6543   user: admin   pass: password   db: sample
   psql:  psql -h localhost -p 6543 -U admin -d sample
+  uri:   postgresql://admin:password@localhost:6543/sample
 
 mongo-primary  (always on, doubles as replica set primary)
   host: localhost   port: 27017   user: admin   pass: password   db: sample (authSource=admin)
@@ -685,6 +690,7 @@ project ini (join network cpg-cache), pake nama service (redis) bukan localhost.
 redis
   host: localhost   port: 6379   pass: password
   cli:  redis-cli -h localhost -p 6379 -a password
+  uri:  redis://:password@localhost:6379
 
 redis-insight  (web UI, no login by default)
   url: http://localhost:5540   <- [host] buka ini di browser
@@ -695,6 +701,8 @@ redis-insight  (web UI, no login by default)
 redis-cluster-1..6  (profile: redis-cluster)
   hosts: localhost:17001-17006   pass: password   (bus: 27001-27006)
   cli:   redis-cli -c -h localhost -p 17001 -a password  (-c follows MOVED redirects)
+  seed uri: redis://:password@localhost:17001   (client harus cluster-aware buat
+    ngikutin MOVED ke node lain - satu seed URI ini gak cukup buat client biasa)
   ports geser dari 7000-7005 - macOS AirPlay Receiver nempatin 7000 & 5000
 EOF
       ;;
