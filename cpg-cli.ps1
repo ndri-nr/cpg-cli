@@ -32,6 +32,18 @@ param(
 
 Set-Location $PSScriptRoot
 
+# Without this, Windows PowerShell 5.1's console decodes our UTF-8 box-drawing/emoji
+# output (─╭╮╰╯●▸❯✳) as the system ANSI codepage (usually 1252) instead of UTF-8 -
+# each multi-byte char splits into mojibake (e.g. "─" -> "â"?"). Setting both
+# OutputEncoding vars up front fixes it for the whole session. Wrapped in try/catch:
+# redirected/piped output (non-interactive runs, e.g. scripted smoke tests) can't set
+# Console.OutputEncoding and throws - safe to skip in that case, nothing renders icons
+# there anyway.
+try {
+  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch { }
+
 $GroupFile = @{
   database      = "compose/database.yml"
   cache         = "compose/cache.yml"
