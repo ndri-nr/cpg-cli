@@ -636,6 +636,11 @@ show_detail() {
     database)
       cat <<'EOF'
 === database ===
+[host] semua alamat di bawah = akses dari LUAR docker (Windows/host tool langsung -
+psql, mongo-express di browser, dst). Connect dari CONTAINER lain di project ini
+(join network cpg-database)? Pake nama service (postgres, mongo-primary, dst) bukan
+localhost, dan port INTERNAL container-nya (liat compose/database.yml), bukan port
+yang di-map ke host di bawah ini - beda buat beberapa service (misal pgpool).
 
 postgres  (master, read/write, always on)
   host: localhost   port: 5432   user: admin   pass: password   db: sample
@@ -674,16 +679,18 @@ EOF
     cache)
       cat <<'EOF'
 === cache ===
+[host] semua alamat di bawah = akses dari LUAR docker. Dari CONTAINER lain di
+project ini (join network cpg-cache), pake nama service (redis) bukan localhost.
 
 redis
   host: localhost   port: 6379   pass: password
   cli:  redis-cli -h localhost -p 6379 -a password
 
 redis-insight  (web UI, no login by default)
-  url: http://localhost:5540
-  add connection inside using: host=redis (NOT localhost - redis-insight runs in its
-    own container on the same cpg-cache network, "localhost" there means itself),
-    port=6379, username=(kosongin, no ACL), pass=password
+  url: http://localhost:5540   <- [host] buka ini di browser
+  [container] tapi field koneksi DI DALEM redis-insight sendiri: redis-insight jalan
+    sbg container juga di network cpg-cache, jadi "localhost" di situ = dirinya
+    sendiri, bukan redis. Isi: host=redis, port=6379, username=(kosongin), pass=password
 
 redis-cluster-1..6  (profile: redis-cluster)
   hosts: localhost:17001-17006   pass: password   (bus: 27001-27006)
@@ -694,6 +701,8 @@ EOF
     messaging)
       cat <<'EOF'
 === messaging ===
+[host] alamat di bawah = akses dari LUAR docker. Dari container lain di project ini
+(join network cpg-messaging), pake nama service (rabbitmq) bukan localhost.
 
 rabbitmq
   amqp:  amqp://admin:password@localhost:5672
@@ -703,6 +712,10 @@ EOF
     observability)
       cat <<'EOF'
 === observability ===
+[host] alamat di bawah = akses dari LUAR docker. App yang lo develop DI DALEM
+container lain (join network cpg-observability) kirim trace/metric ke nama service
+(otel-collector) bukan localhost - app yang jalan langsung di host tetep pake
+localhost seperti biasa.
 
 otel-collector  (no auth)
   grpc: localhost:4317
@@ -722,6 +735,7 @@ EOF
     quality)
       cat <<'EOF'
 === quality ===
+[host] alamat di bawah = akses dari LUAR docker (browser di Windows).
 
 sonarqube
   url: http://localhost:9000
@@ -733,8 +747,11 @@ EOF
 === ai ===
 
 chromadb  (no auth by default)
-  url: http://localhost:8100
+  url: http://localhost:8100   <- [host] akses dari luar docker
   heartbeat: http://localhost:8100/api/v2/heartbeat
+  [container] app lo sendiri jalan sbg container yang di-join ke cpg-database +
+    cpg-cache (kayak chromadb sendiri, liat compose/ai.yml)? Pake host=chromadb,
+    port=8100 - bukan localhost.
 EOF
       ;;
   esac
