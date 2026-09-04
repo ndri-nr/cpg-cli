@@ -401,6 +401,58 @@ EOF
 
 # --- actions --------------------------------------------------------------
 
+# `start`/`restart` are the only actions that actually need Docker running (`stop`
+# on an already-off daemon has nothing to do; `status`/`detail` just show 0/N). If
+# `docker info` fails, offer to launch it instead of failing the whole command with
+# a raw "Cannot connect to the Docker daemon" error - best-effort per OS, since
+# there's no single cross-platform "start docker" command.
+ensure_docker_running() {
+  docker info >/dev/null 2>&1 && return 0
+  echo "${C_YELLOW}!${C_RESET} Docker keliatannya mati."
+
+  local start_cmd=""
+  case "$(uname -s)" in
+    Linux) command -v systemctl >/dev/null 2>&1 && start_cmd="sudo systemctl start docker" ;;
+    Darwin) start_cmd="open -a Docker" ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # Docker Desktop's default install path - the engine itself is a Windows
+      # service, but launching the app is what actually brings the whole stack up.
+      local exe="/c/Program Files/Docker/Docker/Docker Desktop.exe"
+      [[ -x "$exe" ]] && start_cmd="\"$exe\""
+      ;;
+  esac
+  if [[ -z "$start_cmd" ]]; then
+    echo "${C_DIM}  Gak nemu cara nyalain Docker otomatis di OS ini - nyalain manual, terus ulangi command tadi.${C_RESET}"
+    return 1
+  fi
+
+  local yn
+  read -rp "${C_YELLOW}?${C_RESET} Nyalain Docker sekarang ($start_cmd)? (y/n) " yn
+  if [[ ! "$yn" =~ ^[Yy] ]]; then
+    echo "${C_DIM}(batal)${C_RESET}"
+    return 1
+  fi
+
+  echo "${C_ACCENT}▸${C_RESET} $start_cmd"
+  # Backgrounded and disowned: Docker Desktop takes a while to actually come up, the
+  # launch command itself returns almost instantly either way.
+  ( eval "$start_cmd" >/dev/null 2>&1 & disown ) 2>/dev/null
+
+  echo -n "Nunggu Docker nyala"
+  local i
+  for (( i = 0; i < 60; i++ )); do
+    if docker info >/dev/null 2>&1; then
+      echo " ${C_GREEN}✓${C_RESET}"
+      return 0
+    fi
+    echo -n "."
+    sleep 2
+  done
+  echo " ${C_RED}✗${C_RESET}"
+  echo "${C_DIM}  Masih mati setelah ~2 menit nunggu - cek Docker Desktop manual, terus ulangi command tadi.${C_RESET}"
+  return 1
+}
+
 ensure_dependencies() {
   local group="$1"
   local deps="${GROUP_DEPENDS[$group]:-}"
@@ -473,6 +525,7 @@ _start_one() {
 # started independently; a bad name in the middle just gets skipped (with a message)
 # instead of aborting the rest of the batch.
 do_start() {
+  ensure_docker_running || return 1
   _take_flags "$@"
   local groups=("${FLAG_REST[@]+"${FLAG_REST[@]}"}")
   if [[ ${#groups[@]} -eq 0 ]]; then
@@ -551,6 +604,7 @@ _restart_one() {
 }
 
 do_restart() {
+  ensure_docker_running || return 1
   _take_flags "$@"
   local groups=("${FLAG_REST[@]+"${FLAG_REST[@]}"}")
   if [[ ${#groups[@]} -eq 0 ]]; then

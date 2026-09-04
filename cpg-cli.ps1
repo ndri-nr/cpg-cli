@@ -394,6 +394,49 @@ jadi status gak ngitung mereka - keliatan sbg "+N profil" di belakang list.
 
 # --- actions -----------------------------------------------------------
 
+function Test-DockerRunning {
+  docker info *> $null
+  return $LASTEXITCODE -eq 0
+}
+
+# `start`/`restart` are the only actions that actually need Docker running (`stop`
+# on an already-off daemon has nothing to do; `status`/`detail` just show 0/N). If
+# Docker isn't up, offer to launch Docker Desktop instead of failing the whole
+# command with a raw "error during connect" message.
+function Ensure-DockerRunning {
+  if (Test-DockerRunning) { return $true }
+  Write-Host "! Docker keliatannya mati." -ForegroundColor Yellow
+
+  $exe = Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+  if (-not (Test-Path $exe)) {
+    Write-Host "  Gak nemu Docker Desktop di '$exe' - nyalain manual, terus ulangi command tadi." -ForegroundColor DarkGray
+    return $false
+  }
+
+  $yn = Read-Host "? Nyalain Docker sekarang ($exe)? (y/n)"
+  if ($yn -notmatch '^[Yy]') {
+    Write-Host "(batal)" -ForegroundColor DarkGray
+    return $false
+  }
+
+  Write-Host -NoNewline "▸ " -ForegroundColor DarkYellow
+  Write-Host "Start-Process `"$exe`""
+  Start-Process -FilePath $exe | Out-Null
+
+  Write-Host -NoNewline "Nunggu Docker nyala"
+  for ($i = 0; $i -lt 60; $i++) {
+    if (Test-DockerRunning) {
+      Write-Host " ✓" -ForegroundColor Green
+      return $true
+    }
+    Write-Host -NoNewline "."
+    Start-Sleep -Seconds 2
+  }
+  Write-Host " ✗" -ForegroundColor Red
+  Write-Host "  Masih mati setelah ~2 menit nunggu - cek Docker Desktop manual, terus ulangi command tadi." -ForegroundColor DarkGray
+  return $false
+}
+
 function Ensure-Dependencies([string]$groupName) {
   $deps = $GroupDepends[$groupName]
   if (-not $deps) { return }
@@ -463,6 +506,7 @@ function Invoke-StartOne([string]$groupName, [bool]$All = $false) {
 # started independently; a bad name in the middle just gets skipped (with a message)
 # instead of aborting the rest of the batch.
 function Invoke-Start([string[]]$groupNames) {
+  if (-not (Ensure-DockerRunning)) { return }
   $flags = Split-AllFlag $groupNames
   $groupNames = $flags.Rest
   if ($groupNames.Count -eq 0) {
@@ -527,6 +571,7 @@ function Invoke-RestartOne([string]$groupName, [bool]$All = $false) {
 }
 
 function Invoke-Restart([string[]]$groupNames) {
+  if (-not (Ensure-DockerRunning)) { return }
   $flags = Split-AllFlag $groupNames
   $groupNames = $flags.Rest
   if ($groupNames.Count -eq 0) {
