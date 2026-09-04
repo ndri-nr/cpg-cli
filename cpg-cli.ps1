@@ -647,7 +647,9 @@ redis
 
 redis-insight  (web UI, no login by default)
   url: http://localhost:5540
-  add connection inside using: host=localhost, port=6379, pass=password
+  add connection inside using: host=redis (NOT localhost - redis-insight runs in its
+    own container on the same cpg-cache network, "localhost" there means itself),
+    port=6379, username=(kosongin, no ACL), pass=password
 
 redis-cluster-1..6  (profile: redis-cluster)
   hosts: localhost:17001-17006   pass: password   (bus: 27001-27006)
