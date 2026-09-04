@@ -908,7 +908,7 @@ function Disable-AltScreen {
   Write-Vt "$($script:E)[?1049l"
   if ($script:PaneLog -and (Test-Path $script:PaneLog)) {
     try {
-      $tail = Get-Content -LiteralPath $script:PaneLog -Tail 500 -ErrorAction Stop
+      $tail = Get-Content -LiteralPath $script:PaneLog -Tail 500 -Encoding UTF8 -ErrorAction Stop
       foreach ($line in $tail) { [Console]::Out.Write("$line`r`n") }
     } catch { }
   }
@@ -986,7 +986,7 @@ function Repaint-Pane {
     Write-Vt "$e`7"
     return
   }
-  $all = @(Get-Content -LiteralPath $script:PaneLog -ErrorAction SilentlyContinue)
+  $all = @(Get-Content -LiteralPath $script:PaneLog -Encoding UTF8 -ErrorAction SilentlyContinue)
   if ($all.Count -eq 0) {
     Write-Vt "$e`7"
     return
@@ -1019,7 +1019,7 @@ function Repaint-Pane {
 # rows - so the oldest output is actually reachable even when lines wrap.
 function Get-ScrollMax {
   if (-not $script:PaneLog -or -not (Test-Path $script:PaneLog)) { return 0 }
-  $all = @(Get-Content -LiteralPath $script:PaneLog -ErrorAction SilentlyContinue)
+  $all = @(Get-Content -LiteralPath $script:PaneLog -Encoding UTF8 -ErrorAction SilentlyContinue)
   if ($all.Count -eq 0) { return 0 }
   $rows = 0
   $k = 0
