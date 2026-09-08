@@ -679,8 +679,11 @@ mongo-replica-1 / mongo-replica-2  (profile: mongo-cluster)
 mongo-express  (web UI for mongo-primary)
   url: http://localhost:8888
   basic auth login: admin / admin   <- NOT the same as mongo's creds above
-  [container] konek cuma ke mongo-primary, GAK cluster-aware (ME_CONFIG_MONGODB_SERVER
-    di-set ke satu host doang) - dan gak bisa gampang dibikin cluster-aware: replica
+  [container] konek cuma ke mongo-primary, GAK cluster-aware (ME_CONFIG_MONGODB_URL
+    di-set ke satu host + directConnection=true; ME_CONFIG_MONGODB_SERVER sendiri
+    DIABAIKAN sama mongo-express 1.x, image-nya default ke mongodb://mongo:27017 yang
+    gak ada host-nya -> entrypoint stuck di retry loop) - dan gak bisa gampang dibikin
+    cluster-aware: replica
     set member ini self-announce sbg 127.0.0.1 (trik biar kebuka dari Windows host),
     jadi kalo mongo-express (atau container lain) nyoba connect pake replicaSet=rs0,
     discovery-nya nyasar connect ke DIRINYA SENDIRI (udah dicoba: MongoNetworkError

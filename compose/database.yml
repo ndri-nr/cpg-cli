@@ -150,7 +150,15 @@ services:
     depends_on:
       - mongo-primary
     environment:
-      ME_CONFIG_MONGODB_SERVER: mongo-primary
+      # mongo-express 1.x ignores ME_CONFIG_MONGODB_SERVER (deprecated) and uses
+      # ME_CONFIG_MONGODB_URL, whose baked-in default is mongodb://mongo:27017 - the
+      # entrypoint's TCP wait loop would hang on that non-existent host. And because
+      # mongo-primary is a replica set whose members are 127.0.0.1:27017/27019/27020
+      # (loopback trick, see below), the driver's topology discovery would then chase
+      # 127.0.0.1:27019/27020 *inside this container* -> ECONNREFUSED. directConnection=true
+      # pins it to mongo-primary:27017 and skips discovery (so it only ever sees the
+      # primary - that's the tradeoff, see docs/ on why this can't go full-cluster).
+      ME_CONFIG_MONGODB_URL: mongodb://admin:password@mongo-primary:27017/?directConnection=true
       ME_CONFIG_MONGODB_ADMINUSERNAME: admin
       ME_CONFIG_MONGODB_ADMINPASSWORD: password
       ME_CONFIG_BASICAUTH_USERNAME: admin
@@ -216,6 +224,13 @@ services:
   # keeps its existing data/becomes PRIMARY; the two replicas initial-sync from it).
   # Safe to re-run (`up -d` again) - if already initiated, rs.initiate() fails
   # harmlessly and the `|| echo` keeps this container exiting 0.
+  #
+  # Member 0 gets priority 2 so PRIMARY always lands on mongo-primary:27017 (with all
+  # priorities equal, an election after any restart can park PRIMARY on a replica -
+  # and mongo-express connects with directConnection=true to 27017, which then fails
+  # with NotPrimaryNoSecondaryOk). Existing replica sets keep their old config; to
+  # apply the priority there:
+  #   docker compose -f compose/database.yml exec mongo-primary mongosh -u admin   #     -p password --quiet --eval   #     'c = rs.conf(); c.members[0].priority = 2; rs.reconfig(c)'
   mongo-cluster-init:
     image: mongo:latest
     container_name: mongo-cluster-init
@@ -234,7 +249,7 @@ services:
       - >
         mongosh -u admin -p password --authenticationDatabase admin --eval
         'rs.initiate({_id: "rs0", members: [
-          {_id: 0, host: "127.0.0.1:27017"},
+          {_id: 0, host: "127.0.0.1:27017", priority: 2},
           {_id: 1, host: "127.0.0.1:27019"},
           {_id: 2, host: "127.0.0.1:27020"}
         ]})'

@@ -118,3 +118,21 @@ Docker + compose plugin first, offers a per-OS install if missing).
   permissions can't survive a Windows bind-mount, so `mongo/mongo-entrypoint.sh` copies
   it into the container and fixes ownership before starting `mongod` (same trick as
   `postgres/replica-entrypoint.sh`).
+- `mongo-express:1.0.2` **ignores `ME_CONFIG_MONGODB_SERVER`** (deprecated in 1.x) and
+  reads `ME_CONFIG_MONGODB_URL`, whose baked-in image default is `mongodb://mongo:27017`
+  — a host that doesn't exist here, so the entrypoint's TCP wait loop spins 10x and the
+  container dies (`mongo: Name does not resolve`). It also needs
+  `?directConnection=true`: `mongo-primary` is a replica set whose members self-announce
+  as `127.0.0.1:27017/27019/27020`, so the driver's topology discovery otherwise chases
+  `127.0.0.1:27019/27020` *inside the mongo-express container* → `ECONNREFUSED`.
+- The `rs0` members need **`priority: 2` on member 0** (`mongo-cluster-init` sets it).
+  With every priority equal, an election after any restart can park PRIMARY on a
+  replica, and mongo-express's `directConnection=true` to 27017 then fails with
+  `NotPrimaryNoSecondaryOk`. `rs.reconfig` only runs on the current primary — reach it
+  through the shared netns: `docker compose -f compose/database.yml exec mongo-primary
+  mongosh --port 27019 -u admin -p password ...`.
+- **Recreating `mongo-primary` kills `mongo-replica-1/2`** (exit 137): they share its
+  network namespace (`network_mode: service:mongo-primary`), and `docker restart` can't
+  re-attach them to the new netns. Even `up -d mongo-express` touches `mongo-primary`
+  via `depends_on` and triggers this. Recovery is a forced recreate, not a restart:
+  `docker compose -f compose/database.yml --profile mongo-cluster up -d --force-recreate mongo-replica-1 mongo-replica-2`
