@@ -29,7 +29,10 @@ file *and* both scripts' service lists.
 
 - `database` — postgres (master), postgres-replica-1/2 (`--profile postgres-replica`,
   streaming replication via `pg_basebackup`), pgpool (round-robin read routing,
-  writes→master), timescaledb, mongo-primary (replica set primary), mongo-replica-1/2
+  writes→master), timescaledb (master), timescaledb-replica-1/2 + timescaledb-pool
+  (`--profile timescale-replica`, streaming replication via `pg_basebackup` + a
+  separate pgpool round-robin read router, same mechanism as postgres),
+  mongo-primary (replica set primary), mongo-replica-1/2
   (`--profile mongo-cluster`), mongo-express.
 - `cache` — redis (single-node), redis-cluster-1..6 (`--profile redis-cluster`, real
   3 masters + 3 replicas), redis-insight.

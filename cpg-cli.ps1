@@ -58,7 +58,7 @@ $GroupFile = @{
 # fully-healthy group show as "partial" forever. `up -d` (the first-run fallback in
 # Invoke-Start) still creates them fine, this list just isn't used for that.
 $SvcGroups = [ordered]@{
-  database      = @("postgres", "postgres-replica-1", "postgres-replica-2", "pgpool", "timescaledb", "mongo-primary", "mongo-replica-1", "mongo-replica-2", "mongo-express")
+  database      = @("postgres", "postgres-replica-1", "postgres-replica-2", "pgpool", "timescaledb", "timescaledb-replica-1", "timescaledb-replica-2", "timescaledb-pool", "mongo-primary", "mongo-replica-1", "mongo-replica-2", "mongo-express")
   cache         = @("redis", "redis-insight", "redis-cluster-1", "redis-cluster-2", "redis-cluster-3", "redis-cluster-4", "redis-cluster-5", "redis-cluster-6")
   messaging     = @("rabbitmq")
   observability = @("otel-collector", "tempo", "prometheus", "grafana")
@@ -79,13 +79,15 @@ $GroupDepends = @{
 $SvcProfile = @{
   "postgres-replica-1" = "postgres-replica"; "postgres-replica-2" = "postgres-replica"
   "pgpool" = "postgres-replica"
+  "timescaledb-replica-1" = "timescale-replica"; "timescaledb-replica-2" = "timescale-replica"
+  "timescaledb-pool" = "timescale-replica"
   "mongo-replica-1" = "mongo-cluster"; "mongo-replica-2" = "mongo-cluster"
   "redis-cluster-1" = "redis-cluster"; "redis-cluster-2" = "redis-cluster"
   "redis-cluster-3" = "redis-cluster"; "redis-cluster-4" = "redis-cluster"
   "redis-cluster-5" = "redis-cluster"; "redis-cluster-6" = "redis-cluster"
 }
 $GroupProfiles = @{
-  database = @("postgres-replica", "mongo-cluster")
+  database = @("postgres-replica", "timescale-replica", "mongo-cluster")
   cache    = @("redis-cluster")
 }
 
@@ -385,8 +387,9 @@ Catatan: grup 'ai' (chromadb) butuh network dari 'database' & 'cache' - kalo itu
 belum nyala, cpg nyalain otomatis dulu sebelum start 'ai'.
 
 start/restart default-nya nyalain SEMUA, termasuk yang di balik compose profile:
-replica Postgres + pgpool (profile postgres-replica), replica set Mongo
-(mongo-cluster), 6 node Redis cluster (redis-cluster). Mau yang inti doang:
+replica Postgres + pgpool (profile postgres-replica), replica TimescaleDB + pool
+(timescale-replica), replica set Mongo (mongo-cluster), 6 node Redis cluster
+(redis-cluster). Mau yang inti doang:
 --no-all (alias: --core, --lean, --min). Yang dilewatin gak kebikin containernya,
 jadi status gak ngitung mereka - keliatan sbg "+N profil" di belakang list.
 "@
@@ -628,10 +631,24 @@ pgpool  (round-robin read routing across replicas, writes -> master, profile: po
   uri:   postgresql://admin:password@localhost:5433/sample
   admin UI login: admin / password
 
-timescaledb
+timescaledb  (master, read/write, always on)
   host: localhost   port: 6543   user: admin   pass: password   db: sample
   psql:  psql -h localhost -p 6543 -U admin -d sample
   uri:   postgresql://admin:password@localhost:6543/sample
+
+timescaledb-replica-1  (read-only standby, profile: timescale-replica)
+  host: localhost   port: 6544   user: admin   pass: password   db: sample
+  uri:   postgresql://admin:password@localhost:6544/sample
+
+timescaledb-replica-2  (read-only standby, profile: timescale-replica)
+  host: localhost   port: 6545   user: admin   pass: password   db: sample
+  uri:   postgresql://admin:password@localhost:6545/sample
+
+timescaledb-pool  (round-robin read routing across timescale replicas, writes -> master, profile: timescale-replica)
+  host: localhost   port: 6546   user: admin   pass: password   db: sample
+  psql:  psql -h localhost -p 6546 -U admin -d sample
+  uri:   postgresql://admin:password@localhost:6546/sample
+  admin UI login: admin / password
 
 mongo-primary  (always on, doubles as replica set primary)
   host: localhost   port: 27017   user: admin   pass: password   db: sample (authSource=admin)
